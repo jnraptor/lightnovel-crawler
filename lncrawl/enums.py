@@ -91,6 +91,20 @@ class FeedbackStatus(IntEnum):
     RESOLVED = 2
 
 
+class ActivityType(IntEnum):
+    LIBRARY = 1
+    NOVEL = 2
+    NOVEL_TRANSLATION = 3
+    VOLUME = 4
+    VOLUME_TRANSLATION = 5
+    CHAPTER = 6
+    CHAPTER_TRANSLATION = 7
+    ACCOUNT = 8
+    SOURCES = 9
+    REQUEST = 10
+    DOWNLOAD = 11
+
+
 class LanguageCode(str, Enum):
     arabic = "ar"
     bangla = "bn"

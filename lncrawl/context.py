@@ -14,6 +14,12 @@ class __AppContext__:
         return Config()
 
     @cached_property
+    def activity(self):
+        from .services.activity import UserActivityService
+
+        return UserActivityService()
+
+    @cached_property
     def admin(self):
         from .services.admin import AdminService
 
@@ -72,6 +78,12 @@ class __AppContext__:
         from .services.novels import NovelService
 
         return NovelService()
+
+    @cached_property
+    def recommendations(self):
+        from .services.recommendations import RecommendationService
+
+        return RecommendationService()
 
     @cached_property
     def tags(self):
@@ -162,6 +174,12 @@ class __AppContext__:
         from .services.lsp import PythonLanguageServer
 
         return PythonLanguageServer()
+
+    @cached_property
+    def tier(self):
+        from .services.access import AccessManager
+
+        return AccessManager()
 
     @cached_property
     def scheduler(self):

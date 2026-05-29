@@ -2,7 +2,7 @@ from hashlib import sha256
 import logging
 from threading import Event
 import time
-from typing import Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Generator, Iterable, List, Optional, Union
 
 import sqlmodel as sq
 
@@ -102,7 +102,7 @@ class TranslationService:
         novel: Novel,
         target: LanguageCode,
         signal: Optional[Event] = None,
-    ):
+    ) -> None:
         translation = ctx.novels.get_novel_translation(novel, target)
         if translation:
             return
@@ -110,42 +110,22 @@ class TranslationService:
         texts = [
             novel.title,
             novel.authors or "",
-            "; ".join(novel.tags),
         ]
+        (title, authors) = self.translate_batch(texts, target, signal)
 
-        done = 0
-        total = 3
-        translated: List[str] = [""] * 4
+        synopsis: List[str] = []
         if novel.synopsis:
-            synopsis: List[str] = []
             for out in self.translate_html(novel.synopsis, target, signal):
-                if isinstance(out, int):
-                    done = 0
-                    synopsis = []
-                    total = 3 + out
-                else:
-                    done += 1
+                if isinstance(out, str):
                     synopsis.append(out)
-                yield done, total
-            translated[0] = "".join(synopsis)
-
-        for i, out in enumerate(self.translate_batch(texts, target, signal)):
-            done += 1
-            translated[i + 1] = out
-            yield done, total
-
-        tags = translated[3].split("; ")
-        if tags:
-            ctx.tags.insert(tags)
 
         with ctx.db.session() as sess:
             translation = NovelTranslation(
                 novel_id=novel.id,
                 language=target,
-                synopsis=translated[0],
-                title=translated[1],
-                authors=translated[2],
-                tags=tags,
+                title=title,
+                authors=authors,
+                synopsis="".join(synopsis),
             )
             sess.add(translation)
             sess.commit()
@@ -155,7 +135,7 @@ class TranslationService:
         volume: Volume,
         target: LanguageCode,
         signal: Optional[Event] = None,
-    ):
+    ) -> None:
         translation = ctx.volumes.get_volume_translation(volume, target)
         if translation:
             return
@@ -176,28 +156,21 @@ class TranslationService:
         chapter: Chapter,
         target: LanguageCode,
         signal: Optional[Event] = None,
-    ) -> Generator[Tuple[int, int], None, None]:
+    ) -> None:
         translation = ctx.chapters.get_chapter_translation(chapter, target)
 
         content = ctx.files.load_text(chapter.content_file)
         content_hash = sha256(content.encode()).hexdigest()
         if translation and translation.content_hash == content_hash and translation.is_available:
-            yield 1, 1
             return
 
-        total = 1
         results = []
         for out in self.translate_html(content, target, signal):
             if isinstance(out, str):
                 results.append(out)
-            else:
-                total = out + 1
-                results.clear()
-            yield len(results), total
         translated = "".join(results)
 
         title = self.translate_text(chapter.title, target)
-        yield total, total
 
         with ctx.db.session() as sess:
             if not translation:
@@ -220,4 +193,4 @@ class TranslationService:
                 )
             sess.commit()
 
-        ctx.files.save_text(translation.translation_file, translated)
+        ctx.files.save_text(translation.content_file, translated)

@@ -1,3 +1,4 @@
+from .activity import UserActivityStats
 from .announcement import AnnouncementCreateRequest, AnnouncementUpdateRequest
 from .config import ConfigProperty, ConfigSection, ConfigUpdateRequest
 from .crawler import LoginData
@@ -37,12 +38,15 @@ from .user import (
     PasswordUpdateRequest,
     PutNotificationRequest,
     ResetPasswordRequest,
+    SendInviteRequest,
     SignupRequest,
     TokenResponse,
     UpdateRequest,
 )
 
 __all__ = [
+    # activity
+    "UserActivityStats",
     # announcement
     "AnnouncementCreateRequest",
     "AnnouncementUpdateRequest",
@@ -89,6 +93,7 @@ __all__ = [
     "ForgotPasswordRequest",
     "ResetPasswordRequest",
     "PutNotificationRequest",
+    "SendInviteRequest",
     # feedback
     "FeedbackCreateRequest",
     "FeedbackUpdateRequest",

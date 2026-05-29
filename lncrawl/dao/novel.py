@@ -33,7 +33,7 @@ class Novel(BaseTable, table=True):
     manga: bool = sa.Field(default=False, description="True if this entry is a manga/manhua/comic")
     language: Optional[str] = sa.Field(
         default=None,
-        sa_column=sa.Column(sa.CHAR(2)),
+        sa_column=sa.Column(sa.CHAR(2), index=True),
         description="ISO 639-1 two-letter language code (e.g. 'en', 'ja', 'zh')",
     )
 
@@ -72,6 +72,3 @@ class NovelTranslation(BaseTable, table=True):
     title: str = sa.Field(description="Translated title of the novel")
     authors: Optional[str] = sa.Field(default=None, description="Translated list of authors")
     synopsis: Optional[str] = sa.Field(default=None, description="Translated synopsis or novel")
-    tags: List[str] = sa.Field(
-        default=[], sa_type=sa.JSON, description="Translated genres or thematic tags"
-    )
