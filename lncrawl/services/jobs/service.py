@@ -640,56 +640,6 @@ class JobService:
             sess.commit()
 
     # -------------------------------------------------------------------------
-    #                           RETRY FAILED Jobs
-    # -------------------------------------------------------------------------
-
-    def retry_failed(self, user: User, job_id: str) -> Job:
-        with ctx.db.session() as sess:
-            job = sess.get(Job, job_id)
-            if not job:
-                raise ServerErrors.no_such_job
-
-            desc_ids = select_descendants(job_id, inclusive=False)
-            failed_jobs = sess.exec(
-                sq.select(Job).where(
-                    sq.col(Job.id).in_(desc_ids),
-                    Job.status == JobStatus.FAILED,
-                )
-            ).all()
-
-            if not failed_jobs:
-                raise ServerErrors.no_failed_jobs
-
-            new_count = 0
-            for failed_job in failed_jobs:
-                sess.add(
-                    Job(
-                        type=failed_job.type,
-                        extra=failed_job.extra,
-                        user_id=failed_job.user_id,
-                        parent_job_id=failed_job.parent_job_id,
-                        depends_on=failed_job.depends_on,
-                        priority=failed_job.priority,
-                    )
-                )
-                new_count += 1
-
-            ancestor_ids = select_ancestors(job_id, inclusive=True)
-            sess.exec(
-                sq.update(Job)
-                .where(sq.col(Job.id).in_(ancestor_ids))
-                .where(Job.is_done == True)
-                .values(is_done=False, status=JobStatus.PENDING)
-            )
-
-            self._update_up(sess, job_id, total=Job.total + new_count)
-
-            sess.commit()
-            sess.refresh(job)
-
-        return job
-
-    # -------------------------------------------------------------------------
     #                            Internal Methods
     # -------------------------------------------------------------------------
     def _create(
