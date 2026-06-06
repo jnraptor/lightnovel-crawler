@@ -19,7 +19,7 @@ def should_upload_to_discord(file_path: Path, max_size_mb: float) -> bool:
 def upload_to_fileio(file_path: Path) -> str:
     with open(file_path, "rb") as f:
         response = httpx.post(
-            "https://file.io",
+            "https://www.file.io/",
             files={"file": (file_path.name, f)},
             timeout=120.0,
         )
