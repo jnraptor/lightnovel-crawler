@@ -125,6 +125,9 @@ class ServerErrors:
 
     no_such_user = ServerError(status.HTTP_404_NOT_FOUND, "No such user")
     no_such_job = ServerError(status.HTTP_404_NOT_FOUND, "No such job")
+    no_failed_jobs = ServerError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT, "No failed jobs to retry"
+    )
     no_such_file = ServerError(status.HTTP_404_NOT_FOUND, "No such file")
     no_such_novel = ServerError(status.HTTP_404_NOT_FOUND, "No such novel")
     no_such_tag = ServerError(status.HTTP_404_NOT_FOUND, "No such tag")

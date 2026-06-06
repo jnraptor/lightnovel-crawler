@@ -93,6 +93,15 @@ def replay_job(
     )
 
 
+@router.post("/{job_id}/retry-failed", summary="Retry only the failed children of a job")
+def retry_failed_job(
+    user: User = Security(ensure_user),
+    job_id: str = Path(),
+) -> Job:
+    ctx.jobs.verify_access(user, job_id)
+    return ctx.jobs.retry_failed(user, job_id)
+
+
 @router.post("/create/fetch-novels", summary="Create a job to fetch multiple novels")
 def fetch_novels(
     user: User = Security(ensure_user),
