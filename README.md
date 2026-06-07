@@ -194,7 +194,12 @@ lncrawl discord
 |---|---|---|---|
 | `DISCORD_TOKEN` | Yes | — | Bot token from Discord Developer Portal |
 | `DISCORD_GUILD_ID` | No | — | Guild ID for instant command sync (dev only; global sync can take ~1 hour) |
-| `DISCORD_MAX_FILE_SIZE_MB` | No | `25` | Max file size (MB) for direct Discord upload; larger files are uploaded to file.io |
+| `DISCORD_MAX_FILE_SIZE_MB` | No | `25` | Max file size (MB) for direct Discord upload; larger files are uploaded to Sharry |
+| `SHARRY_URL` | Yes* | — | Sharry server URL (e.g. `https://sharry.example.com`) |
+| `SHARRY_USER` | Yes* | — | Sharry account username |
+| `SHARRY_PASS` | Yes* | — | Sharry account password |
+
+\* Required only when files exceed `DISCORD_MAX_FILE_SIZE_MB`.
 
 The bot sends progress updates during `/crawl` — novel info, chapter count, download progress, and artifact generation — so you see each stage complete rather than waiting silently.
 
