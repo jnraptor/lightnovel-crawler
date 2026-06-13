@@ -7,9 +7,8 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from PIL import UnidentifiedImageError
 from requests.exceptions import RequestException
+from scraper._engine.exceptions import AbortedException, CloudflareException
 from urllib3.exceptions import HTTPError
-
-from .cloudscraper.exceptions import AbortedException, CloudflareException
 
 __all__ = [
     "LNException",
@@ -116,6 +115,9 @@ class ServerErrors:
     job_limit_reached = ServerError(
         status.HTTP_429_TOO_MANY_REQUESTS, "Active job limit reached for your tier"
     )
+    search_job_limit_reached = ServerError(
+        status.HTTP_429_TOO_MANY_REQUESTS, "Search job limit reached for your tier"
+    )
     library_limit_reached = ServerError(
         status.HTTP_429_TOO_MANY_REQUESTS, "Library limit reached for your tier"
     )
@@ -196,6 +198,9 @@ class ServerErrors:
     source_not_loaded = ServerError(status.HTTP_501_NOT_IMPLEMENTED, "Sources are not loaded")
     no_crawler = ServerError(status.HTTP_501_NOT_IMPLEMENTED, "No crawler found for the domain")
     crawler_test_failure = ServerError(status.HTTP_417_EXPECTATION_FAILED, "Crawler test failed")
+    search_not_supported = ServerError(
+        status.HTTP_501_NOT_IMPLEMENTED, "Search is not implemented for the source"
+    )
 
 
 class WebSocketError(LNException):
