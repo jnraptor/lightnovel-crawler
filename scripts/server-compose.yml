@@ -1,17 +1,33 @@
+x-torproxy: &torproxy
+  image: sdipu/tor-proxy:latest
+  restart: unless-stopped
+  environment:
+    SOCKS_HOST: 0.0.0.0
+    CONTROL_HOST: 0.0.0.0
+    CONTROL_PASSWORD: "secret"
+    SOCKS_POLICY: accept *
+  deploy:
+    resources:
+      limits:
+        cpus: "0.25"
+        memory: "128M"
+      reservations:
+        memory: "32M"
+
 services:
   server:
     image: ghcr.io/lncrawl/lightnovel-crawler:latest
+    init: true
     ports:
       - "23457:8080"
     command: -ll server -p 8080
+    restart: unless-stopped
     environment:
       - LNCRAWL_DATA_PATH=/data
-      - TOR_CONTROL_HOST=torproxy
-      - TOR_PROXY_URL=socks5h://torproxy:9150
       - DATABASE_URL=postgresql+psycopg://pguser:pgpass@postgres:5432/lncrawl
+      - PROXY_URLS=tor;torproxy-1;9150;9151;secret,tor;torproxy-2;9150;9151;secret,tor;torproxy-3;9150;9151;secret
     volumes:
       - ./appdata:/data
-    restart: unless-stopped
     labels:
       - autoheal=true
     healthcheck:
@@ -27,11 +43,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "3.00"
-          memory: "5G"
+          cpus: "3.50"
+          memory: "4G"
         reservations:
-          cpus: "2.00"
-          memory: "1G"
+          memory: "512M"
 
   autoheal:
     image: willfarrell/autoheal:latest
@@ -42,36 +57,35 @@ services:
       AUTOHEAL_CONTAINER_LABEL: autoheal
       AUTOHEAL_INTERVAL: 30
       AUTOHEAL_START_PERIOD: 90
+    deploy:
+      resources:
+        limits:
+          memory: "128M"
+        reservations:
+          memory: "16M"
 
   postgres:
     image: postgres:alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: pguser
       POSTGRES_PASSWORD: pgpass
       POSTGRES_DB: lncrawl
     volumes:
       - ./pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
     deploy:
       resources:
         limits:
           cpus: "2.00"
-          memory: "2G"
-        reservations:
           memory: "512M"
-
-  torproxy:
-    image: sdipu/tor-proxy:latest
-    restart: unless-stopped
-    environment:
-      SOCKS_HOST: 0.0.0.0
-      CONTROL_HOST: 0.0.0.0
-      CONTROL_PASSWORD: "secret"
-      SOCKS_POLICY: accept 127.0.0.1,accept 10.0.0.0/8,accept 172.16.0.0/12,accept 192.168.0.0/16
-    deploy:
-      resources:
-        limits:
-          cpus: "0.50"
-          memory: "256M"
         reservations:
-          memory: "64M"
+          memory: "128M"
+
+  torproxy-1:
+    <<: *torproxy
+
+  torproxy-2:
+    <<: *torproxy
+
+  torproxy-3:
+    <<: *torproxy

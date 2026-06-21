@@ -2454,6 +2454,15 @@ wheels = [
 ]
 
 [[package]]
+name = "imap-tools"
+version = "1.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f7/cb/76d8697739439be6dd0261db5a27c945fb6a43e054f2d2e90283be502058/imap_tools-1.13.0.tar.gz", hash = "sha256:0da0d72c921a724cba09b959bad9bfaf60bca537a697e69a076fdf607ef5775c", size = 47683, upload-time = "2026-05-12T07:14:54.488Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/a8/0f58c13d2660d5fc8f808ce8b46828d2941752ec21e4015bde99c08b37d7/imap_tools-1.13.0-py3-none-any.whl", hash = "sha256:656c37beba22ab2929b73c07d0ca397ae8805b670d390b1127723e3335244e6d", size = 35849, upload-time = "2026-05-12T07:14:52.669Z" },
+]
+
+[[package]]
 name = "importlib-metadata"
 version = "8.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2647,6 +2656,7 @@ dependencies = [
     { name = "httpx", extra = ["brotli", "http2"] },
     { name = "humanize", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
     { name = "humanize", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
+    { name = "imap-tools" },
     { name = "lncrawl-scraper", extra = ["all"] },
     { name = "lxml" },
     { name = "nodriver" },
@@ -2738,7 +2748,8 @@ requires-dist = [
     { name = "html5lib", specifier = "~=1.1" },
     { name = "httpx", extras = ["brotli", "http2"], specifier = ">=0.27.0" },
     { name = "humanize", specifier = ">=4.0.0" },
-    { name = "lncrawl-scraper", extras = ["all"], specifier = "==0.1.2" },
+    { name = "imap-tools", specifier = ">=1.10.0" },
+    { name = "lncrawl-scraper", extras = ["all"], specifier = ">=0.2.3" },
     { name = "lxml", specifier = ">=5.4.0,<7.0.0" },
     { name = "lxml-stubs", marker = "extra == 'dev'", specifier = ">=0.5.0" },
     { name = "nodriver", specifier = ">=0.50" },
@@ -2789,7 +2800,7 @@ provides-extras = ["dev", "lsp"]
 
 [[package]]
 name = "lncrawl-scraper"
-version = "0.1.2"
+version = "0.2.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "beautifulsoup4" },
@@ -2799,9 +2810,9 @@ dependencies = [
     { name = "requests", version = "2.32.5", source = { registry = "https://pypi.org/simple" }, extra = ["socks"], marker = "python_full_version < '3.10'" },
     { name = "requests", version = "2.34.2", source = { registry = "https://pypi.org/simple" }, extra = ["socks"], marker = "python_full_version >= '3.10'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/c0/638729d7782403f3d8aef8b3e161a307a39eaf3f5a9f02be68de9787a838/lncrawl_scraper-0.1.2.tar.gz", hash = "sha256:998ae294dadc75543d6c8a4736ef04d4871a300408cb27e01147d1945e06c937", size = 171757, upload-time = "2026-06-12T20:40:15.202Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/21/40990df1a0411debb90204be60e2393e85df16c827a640aeeb340bbff51e/lncrawl_scraper-0.2.3.tar.gz", hash = "sha256:0d0ace0d8c2202306a358add06ea37da21456e24febff99e76077d058c8914d8", size = 176501, upload-time = "2026-06-16T09:52:01.968Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/7f/f4513ca341ed13f4a58d66a438d54b18eabf51274fe262d38d8f683091c1/lncrawl_scraper-0.1.2-py3-none-any.whl", hash = "sha256:5f1650c591a407e66d851e5c30e30be231975871ab540e9c1c1ce6a9d8afd181", size = 52161, upload-time = "2026-06-12T20:40:13.695Z" },
+    { url = "https://files.pythonhosted.org/packages/92/40/4b93621540793413692302b527863ca41cf428130a9f8f4933814efd7553/lncrawl_scraper-0.2.3-py3-none-any.whl", hash = "sha256:7699d8566352c3ec79b264eff30707343f567561642c64f54a9ed576ec38e6eb", size = 52479, upload-time = "2026-06-16T09:52:00.756Z" },
 ]
 
 [package.optional-dependencies]

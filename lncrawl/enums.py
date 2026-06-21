@@ -36,6 +36,8 @@ class JobType(IntEnum):
     ARTIFACT_BATCH = 41
     SEARCH_SOURCE = 50
     SEARCH_ALL_SOURCES = 51
+    FETCH_MISSING = 60
+    FETCH_LATEST = 61
 
 
 class JobStatus(IntEnum):
@@ -106,6 +108,7 @@ class ActivityType(IntEnum):
     SOURCES = 9
     REQUEST = 10
     DOWNLOAD = 11
+    ARTIFACT = 12
 
 
 class LanguageCode(str, Enum):

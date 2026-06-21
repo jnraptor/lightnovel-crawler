@@ -8,7 +8,7 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Annotated, Any, Callable, Dict, Optional, Type, TypeVar, Union, cast
+from typing import Annotated, Any, Callable, Type, TypeVar, cast
 import uuid
 
 import dotenv
@@ -118,8 +118,8 @@ def _update(target: dict, source: dict) -> dict:
 class Config(object):
     def __init__(self) -> None:
         dotenv.load_dotenv()
-        self.config_file: Optional[Path] = None
-        self._data: Dict[str, Any] = {}
+        self.config_file: Path | None = None
+        self._data: dict[str, Any] = {}
         _traverse(self)
         self._defaults = self._data.copy()
 
@@ -160,7 +160,7 @@ class Config(object):
 
     # -------------------------------------------------------------- #
 
-    def load(self, file: Optional[Path] = None) -> None:
+    def load(self, file: Path | None = None) -> None:
         """
         Loads configurations from given file, env var or default config.
 
@@ -210,7 +210,7 @@ class Config(object):
 
     # -------------------------------------------------------------- #
 
-    def get(self, section: str, key: str, default: Union[None, T, Callable[[], T]] = None) -> Any:
+    def get(self, section: str, key: str, default: T | Callable[[], T] | None = None) -> Any:
         sub: dict = self._data.setdefault(section, {})
         if key not in sub:
             if callable(default):
@@ -240,7 +240,7 @@ class _Section(object):
         if not self.section:
             raise ValueError(f"section is not defined for {self}")
 
-    def _get(self, key: str, default: Union[T, Callable[[], Any]]) -> T:
+    def _get(self, key: str, default: T | Callable[[], Any]) -> T:
         return self.root.get(self.section, key, default)
 
     def _set(self, key: str, value: Any) -> None:
@@ -609,65 +609,51 @@ class CrawlerConfig(_Section):
         self._set("runner_reset_interval", v)
 
     @property
-    def proxy_url(self) -> str:
-        """Proxy URL for Crawler HTTP Requests.
+    def proxy_urls(self) -> str:
+        """Proxy URLs to route crawler requests through.
 
-        Routes all crawler requests through a proxy. Works with Docker containers
-        such as `peterdavehello/tor-socks-proxy`:
+        Comma-separated list of proxy URLs. Can also be set via the PROXY_URLS
+        environment variable. Each entry is one of:
 
-          docker run -d -p 9150:9150 peterdavehello/tor-socks-proxy
+        - A plain proxy URL (e.g. http://host:port or socks5://host:port/).
+        - A Tor entry in the form tor;<host>;<port>;<control_port>;<control_password>
+          which is expanded to a SOCKS5 Tor proxy with control-port support.
 
-        Set this to `socks5://127.0.0.1:9150`, or any standard HTTP/SOCKS proxy
-        URL. Multiple comma-separated URLs are cycled in round-robin order.
-        Leave blank to disable. Default is `""`.
+        Blank entries are ignored.
         """
-        return self._get("proxy_url", os.getenv("TOR_PROXY_URL") or "")
+        return self._get("proxy_urls", os.getenv("PROXY_URLS") or "")
 
-    @proxy_url.setter
-    def proxy_url(self, v: str) -> None:
-        self._set("proxy_url", v)
+    @proxy_urls.setter
+    def proxy_urls(self, v: str) -> None:
+        self._set("proxy_urls", v)
 
     @property
-    def tor_control_host(self) -> str:
-        """Tor Control Host.
+    def enable_proxy(self) -> bool:
+        """Enable Proxy.
 
-        Hostname or IP of the Tor control port. Default is `"127.0.0.1"`
-        for a local `peterdavehello/tor-socks-proxy` container.
+        When enabled, crawler requests are routed through the URLs listed in
+        `proxy_urls`. Disable to pass all traffic through a direct connection,
+        even if proxy URLs are configured. Enabled by default.
         """
-        return self._get("tor_control_host", os.getenv("TOR_CONTROL_HOST") or "127.0.0.1")
+        return self._get("enable_proxy", True)
 
-    @tor_control_host.setter
-    def tor_control_host(self, v: str) -> None:
-        self._set("tor_control_host", v)
+    @enable_proxy.setter
+    def enable_proxy(self, v: bool) -> None:
+        self._set("enable_proxy", v)
 
     @property
-    def tor_control_port(self) -> int:
-        """Tor Control Port.
+    def allow_fallback_on_proxy_miss(self) -> bool:
+        """Fallback to Direct on Proxy Miss.
 
-        Port for sending `SIGNAL NEWNYM` to rotate the Tor exit IP.
-        Matches the control port exposed by `peterdavehello/tor-socks-proxy`
-        (default 9151). Set to `0` to disable identity rotation.
+        When proxy URLs are configured but none can be reached, allow the scraper
+        to fall back to a direct (localhost) connection instead of failing outright.
+        Enabled by default - disable if you want to hide your IP behind proxy.
         """
-        _default = int(os.getenv("TOR_CONTROL_PORT") or "9151")
-        return self._get("tor_control_port", _default)
+        return self._get("allow_fallback_on_proxy_miss", True)
 
-    @tor_control_port.setter
-    def tor_control_port(self, v: str) -> None:
-        self._set("tor_control_port", v)
-
-    @property
-    def tor_control_password(self) -> str:
-        """Tor Control Password.
-
-        Authentication password for the Tor control port. Leave blank
-        when `CookieAuthentication` or no auth is used (the default for
-        `peterdavehello/tor-socks-proxy`).
-        """
-        return self._get("tor_control_password", "")
-
-    @tor_control_password.setter
-    def tor_control_password(self, v: str) -> None:
-        self._set("tor_control_password", v)
+    @allow_fallback_on_proxy_miss.setter
+    def allow_fallback_on_proxy_miss(self, v: bool) -> None:
+        self._set("allow_fallback_on_proxy_miss", v)
 
 
 # ------------------------------------------------------------------ #
@@ -729,12 +715,38 @@ class ServerConfig(_Section):
     def token_expiry(self, v: int) -> None:
         self._set("token_expiry_minutes", v)
 
+    @property
+    def enable_browse_route(self) -> bool:
+        """Enable Browse.
+
+        This is just a proof-of-concept implementation. Not safe to use.
+        """
+        return self._get("enable_browse_route", False)
+
+    @enable_browse_route.setter
+    def enable_browse_route(self, v: bool) -> None:
+        self._set("enable_browse_route", v)
+
 
 # ------------------------------------------------------------------ #
 #                            Mail Section                            #
 # ------------------------------------------------------------------ #
 class MailConfig(_Section):
     section = "mail"
+
+    @property
+    def smtp_enabled(self) -> bool:
+        """Enable SMTP Sending.
+
+        Set to true to allow the server to send outbound emails (OTP, password reset,
+        invitations, job notifications). When false all outbound mail is silently skipped —
+        useful for local development or when only the IMAP inbox listener is needed.
+        """
+        return self._get("smtp_enabled", False)
+
+    @smtp_enabled.setter
+    def smtp_enabled(self, v: bool) -> None:
+        self._set("smtp_enabled", v)
 
     @property
     def smtp_server(self) -> str:
@@ -800,6 +812,112 @@ class MailConfig(_Section):
     @smtp_sender.setter
     def smtp_sender(self, v: str) -> None:
         self._set("smtp_sender", v)
+
+    @property
+    def smtp_starttls(self) -> bool:
+        """SMTP Use TLS.
+
+        Set to true to upgrade a plain connection to TLS via the STARTTLS command after
+        the initial server greeting.
+        """
+        return self._get("smtp_starttls", True)
+
+    @smtp_starttls.setter
+    def smtp_starttls(self, v: bool) -> None:
+        self._set("smtp_starttls", v)
+
+    @property
+    def imap_enabled(self) -> bool:
+        """Enable IMAP Inbox Listener.
+
+        When true the server listens for incoming emails via IMAP IDLE and automatically
+        sends an invitation to any sender who is not yet a registered user. Requires
+        `imap_username` and `imap_password` to be set.
+
+        If both `smtp_enabled` and `imap_enabled` are true, SMTP handles outbound mail
+        and IMAP handles inbound mail — the recommended full-service setup.
+        """
+        return self._get("imap_enabled", False)
+
+    @imap_enabled.setter
+    def imap_enabled(self, v: bool) -> None:
+        self._set("imap_enabled", v)
+
+    @property
+    def imap_server(self) -> str:
+        """IMAP Server.
+
+        Host name or IP of the IMAP server. `localhost` is the default for a local
+        ProtonMail Bridge or similar proxy.
+        """
+        return self._get("imap_server", "localhost")
+
+    @imap_server.setter
+    def imap_server(self, v: str) -> None:
+        self._set("imap_server", v)
+
+    @property
+    def imap_port(self) -> int:
+        """IMAP Port.
+
+        Network port for the IMAP server. `1143` is the default port used by the local
+        ProtonMail Bridge.
+        """
+        return self._get("imap_port", 1143)
+
+    @imap_port.setter
+    def imap_port(self, v: int) -> None:
+        self._set("imap_port", v)
+
+    @property
+    def imap_username(self) -> str:
+        """IMAP Username.
+
+        Login name for the IMAP server. When using ProtonMail Bridge this is usually
+        the same credential used for SMTP.
+        """
+        return self._get("imap_username", "")
+
+    @imap_username.setter
+    def imap_username(self, v: str) -> None:
+        self._set("imap_username", v)
+
+    @property
+    def imap_password(self) -> Annotated[str, Sensitive]:
+        """IMAP Password.
+
+        Password for the IMAP login. Treated as sensitive and redacted in the admin API.
+        """
+        return self._get("imap_password", "")
+
+    @imap_password.setter
+    def imap_password(self, v: str) -> None:
+        self._set("imap_password", v)
+
+    @property
+    def imap_folder(self) -> str:
+        """IMAP Folder.
+
+        Mailbox folder to monitor for new messages.
+        """
+        return self._get("imap_folder", "INBOX")
+
+    @imap_folder.setter
+    def imap_folder(self, v: str) -> None:
+        self._set("imap_folder", v)
+
+    @property
+    def imap_starttls(self) -> bool:
+        """IMAP Use TLS.
+
+        Set to true to upgrade a plain connection to TLS via the STARTTLS command after
+        the initial server greeting.
+        """
+        return self._get("imap_starttls", True)
+
+    @imap_starttls.setter
+    def imap_starttls(self, v: bool) -> None:
+        self._set("imap_starttls", v)
 
 
 # ------------------------------------------------------------------ #

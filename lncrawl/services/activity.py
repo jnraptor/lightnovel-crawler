@@ -1,18 +1,23 @@
-from typing import Optional
+from typing import List, Optional
 
-from sqlalchemy.exc import IntegrityError
 import sqlmodel as sq
 
 from ..context import ctx
 from ..core.taskman import TaskManager
 from ..dao import ActivityType, UserActivity
-from ..server.models.activity import UserActivityStats
+from ..server.models.activity import (
+    DailyActiveUsers,
+    DailyTypeCount,
+    GlobalActivitySummary,
+    TopUserActivity,
+    UserActivityStats,
+)
 from ..utils.time_utils import current_timestamp
 
 
 class UserActivityService:
     def __init__(self) -> None:
-        self.taskman = TaskManager(3)
+        self.taskman = TaskManager(ctx.config.crawler.runner_concurrency)
 
     def record(self, user_id: str, activity_type: ActivityType, target_id: str) -> None:
         self.taskman.submit_task(self._record, user_id, activity_type, target_id)
@@ -20,31 +25,19 @@ class UserActivityService:
     def _record(self, user_id: str, activity_type: ActivityType, target_id: str) -> None:
         ts = current_timestamp()
         with ctx.db.session() as sess:
-            try:
-                sess.add(
-                    UserActivity(
-                        user_id=user_id,
-                        activity_type=activity_type,
-                        target_id=target_id,
-                        updated_at=ts,
-                    )
+            activity = sess.get(UserActivity, (user_id, activity_type, target_id))
+            if activity is None:
+                activity = UserActivity(
+                    user_id=user_id,
+                    activity_type=activity_type,
+                    target_id=target_id,
+                    updated_at=ts,
                 )
-                sess.commit()
-            except IntegrityError:
-                sess.rollback()
-                sess.exec(
-                    sq.update(UserActivity)
-                    .where(
-                        sq.col(UserActivity.user_id) == user_id,
-                        sq.col(UserActivity.target_id) == target_id,
-                        sq.col(UserActivity.activity_type) == activity_type,
-                    )
-                    .values(
-                        visit_count=UserActivity.visit_count + 1,
-                        last_visited_at=ts,
-                    )
-                )
-                sess.commit()
+                sess.add(activity)
+            else:
+                activity.visit_count += 1
+                activity.updated_at = ts
+            sess.commit()
 
     def get_visit_count(self, target_id: str, activity_type: ActivityType) -> int:
         with ctx.db.session() as sess:
@@ -95,3 +88,105 @@ class UserActivityService:
             activity_count=activity_count,
             visits=visits,
         )
+
+    def _cutoff(self, days: int) -> int:
+        return current_timestamp() - days * 86_400_000
+
+    def _day_label(self, col):
+        """Return an SQL expression that truncates a millisecond-epoch column to YYYY-MM-DD."""
+        if ctx.db.engine.dialect.name == "postgresql":
+            return sq.func.to_char(sq.func.to_timestamp(col / sq.literal(1000.0)), "YYYY-MM-DD")
+        return sq.func.strftime("%Y-%m-%d", sq.func.datetime(col / 1000, "unixepoch"))
+
+    def get_admin_summary(self, days: int) -> GlobalActivitySummary:
+        """Global totals: active users + event counts broken down by type."""
+        cutoff = self._cutoff(days)
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(
+                    sq.col(UserActivity.activity_type),
+                    sq.func.count(sq.distinct(UserActivity.user_id)),
+                    sq.func.sum(UserActivity.visit_count),
+                )
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(sq.col(UserActivity.activity_type))
+            ).all()
+            active_users = sess.exec(
+                sq.select(sq.func.count(sq.distinct(UserActivity.user_id))).where(
+                    UserActivity.updated_at >= cutoff
+                )
+            ).one()
+        by_type = {ActivityType(int(r[0])): int(r[2]) for r in rows}
+        total_events = sum(int(r[2]) for r in rows)
+        total_users = ctx.users.count()
+        return GlobalActivitySummary(
+            total_users=total_users,
+            active_users=active_users,
+            total_events=total_events,
+            by_type=by_type,
+        )
+
+    def get_admin_dau(self, days: int) -> List[DailyActiveUsers]:
+        """Distinct active users per calendar day."""
+        cutoff = self._cutoff(days)
+        day = self._day_label(UserActivity.updated_at).label("day")
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(day, sq.func.count(sq.distinct(UserActivity.user_id)))
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(day)
+                .order_by(day)
+            ).all()
+        return [DailyActiveUsers(date=r[0], users=int(r[1])) for r in rows]
+
+    def get_admin_type_trend(self, days: int) -> List[DailyTypeCount]:
+        """Row count per (day, activity_type) for the multi-series line chart."""
+        cutoff = self._cutoff(days)
+        day = self._day_label(UserActivity.updated_at).label("day")
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(day, sq.col(UserActivity.activity_type), sq.func.count())
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(day, sq.col(UserActivity.activity_type))
+                .order_by(day)
+            ).all()
+        return [
+            DailyTypeCount(date=r[0], activity_type=ActivityType(int(r[1])), events=int(r[2]))
+            for r in rows
+        ]
+
+    def get_admin_top_users(self, days: int, limit: int = 20) -> List[TopUserActivity]:
+        """Users ranked by total visit_count; enriched with name/email."""
+        cutoff = self._cutoff(days)
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(
+                    UserActivity.user_id,
+                    sq.col(UserActivity.activity_type),
+                    sq.func.sum(UserActivity.visit_count),
+                )
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(UserActivity.user_id, sq.col(UserActivity.activity_type))
+            ).all()
+        # aggregate per-type rows into per-user totals in Python
+        user_totals: dict = {}
+        for user_id, atype, count in rows:
+            entry = user_totals.setdefault(user_id, {"total": 0, "by_type": {}})
+            entry["total"] += int(count)
+            entry["by_type"][ActivityType(int(atype))] = int(count)
+        top = sorted(user_totals.items(), key=lambda x: -x[1]["total"])[:limit]
+        # batch-load user name/email for each top user
+        result = []
+        for user_id, data in top:
+            user = ctx.users.get(user_id)
+            if user:
+                result.append(
+                    TopUserActivity(
+                        user_id=user_id,
+                        username=user.name or "",
+                        email=user.email,
+                        total=data["total"],
+                        by_type=data["by_type"],
+                    )
+                )
+        return result

@@ -7,7 +7,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from PIL import UnidentifiedImageError
 from requests.exceptions import RequestException
-from scraper._engine.exceptions import AbortedException, CloudflareException
+from scraper.exceptions import AbortedException, CloudflareException
 from urllib3.exceptions import HTTPError
 
 __all__ = [
@@ -179,6 +179,12 @@ class ServerErrors:
     )
     smtp_server_login_fail = ServerError(
         status.HTTP_503_SERVICE_UNAVAILABLE, "Failed to login to SMTP server"
+    )
+    imap_server_unavailable = ServerError(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "IMAP server is not available"
+    )
+    imap_server_login_fail = ServerError(
+        status.HTTP_503_SERVICE_UNAVAILABLE, "Failed to login to IMAP server"
     )
     email_send_failure = ServerError(status.HTTP_503_SERVICE_UNAVAILABLE, "Failed to send email")
     calibre_exe_not_found = ServerError(

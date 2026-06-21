@@ -21,6 +21,7 @@ web_dir = (Path(__file__).parent / "web").absolute()
 async def lifespan(_app: FastAPI):
     try:
         ctx.setup()
+        ctx.mail.start()
         ctx.scheduler.start()
         ctx.recommendations.warmup()
         yield
@@ -65,6 +66,13 @@ app.add_middleware(
 )
 
 app.add_middleware(StaticFilesGuard, prefix="/static")
+
+# Experimental Features
+if ctx.config.server.enable_browse_route:
+    from .middleware.browser import BrowserNavigation
+
+    app.add_middleware(BrowserNavigation, prefix="/browse")
+
 
 # Add APIs
 app.include_router(api, prefix="/api")
