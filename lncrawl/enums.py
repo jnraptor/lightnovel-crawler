@@ -26,6 +26,7 @@ class JobType(IntEnum):
     CHAPTER_BATCH = 11
     CHAPTER_TRANSLATION = 12
     CHAPTER_TRANSLATION_BATCH = 13
+
     VOLUME = 20
     VOLUME_BATCH = 21
     VOLUME_TRANSLATION = 22
@@ -70,6 +71,10 @@ class OutputFormat(str, Enum):
     pdb = "pdb"
     rb = "rb"
     tcr = "tcr"
+    htmlz = "htmlz"
+    kepub = "kepub"
+    pmlz = "pmlz"
+    snb = "snb"
 
     def __str__(self) -> str:
         return self.value

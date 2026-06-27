@@ -38,7 +38,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: 🏷️ Extract changelog
         id: changelog
@@ -65,7 +65,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: 🧰 Install OpenSSL
         run: choco install -y --no-progress openssl
@@ -81,7 +81,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           UV_PROJECT_ENVIRONMENT: .venv
         run: |
-          uv sync --all-extras --all-groups
+          uv sync --no-dev --extra build --extra lsp
           uv run python -m build -w
           uv run python setup_pyi.py
 
@@ -120,7 +120,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: 🐍 Install uv & Python
         uses: astral-sh/setup-uv@v7
@@ -133,7 +133,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           UV_PROJECT_ENVIRONMENT: .venv
         run: |
-          uv sync --all-extras --all-groups
+          uv sync --no-dev --extra build --extra lsp
           uv run python -m build -w
           uv run python setup_pyi.py
           mv ./dist/lncrawl ./dist/lncrawl-mac
@@ -162,7 +162,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: 🐍 Install uv & Python
         uses: astral-sh/setup-uv@v7
@@ -175,7 +175,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           UV_PROJECT_ENVIRONMENT: .venv
         run: |
-          uv sync --all-extras --all-groups
+          uv sync --no-dev --extra build --extra lsp
           uv run python -m build -w
           uv run python setup_pyi.py
           mv ./dist/lncrawl ./dist/lncrawl-linux
@@ -203,11 +203,11 @@ jobs:
     needs: [build-docker, build-windows, build-mac, build-linux]
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write # PyPI Trusted Publishing (OIDC) via gh-action-pypi-publish
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: 🐍 Install uv & Python
         uses: astral-sh/setup-uv@v7
@@ -220,7 +220,7 @@ jobs:
           PYTHONIOENCODING: utf-8
           UV_PROJECT_ENVIRONMENT: .venv
         run: |
-          uv sync --all-extras --all-groups
+          uv sync --no-dev --extra build
           uv run python -m build -w
 
       - name: 📤 PyPI Publish

@@ -36,6 +36,10 @@ archive_maker: Dict[OutputFormat, Callable[..., None]] = {
     OutputFormat.pdb: convert_epub,
     OutputFormat.rb: convert_epub,
     OutputFormat.tcr: convert_epub,
+    OutputFormat.htmlz: convert_epub,
+    OutputFormat.kepub: convert_epub,
+    OutputFormat.pmlz: convert_epub,
+    OutputFormat.snb: convert_epub,
 }
 
 
