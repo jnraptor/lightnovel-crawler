@@ -4,11 +4,14 @@ import sqlmodel as sq
 
 from ..context import ctx
 from ..core.taskman import TaskManager
-from ..dao import ActivityType, UserActivity
+from ..dao import ActivityType, Novel, UserActivity
 from ..server.models.activity import (
     DailyActiveUsers,
     DailyTypeCount,
+    EngagementBucket,
     GlobalActivitySummary,
+    HourlyActivityCell,
+    TopNovelActivity,
     TopUserActivity,
     UserActivityStats,
 )
@@ -116,6 +119,22 @@ class UserActivityService:
                     UserActivity.updated_at >= cutoff
                 )
             ).one()
+            mau = sess.exec(
+                sq.select(sq.func.count(sq.distinct(UserActivity.user_id))).where(
+                    UserActivity.updated_at >= self._cutoff(30)
+                )
+            ).one()
+            # Users whose earliest activity (min created_at) falls within the window.
+            first_seen = (
+                sq.select(sq.func.min(UserActivity.created_at).label("first"))
+                .group_by(UserActivity.user_id)
+                .subquery()
+            )
+            new_users = sess.exec(
+                sq.select(sq.func.count())
+                .select_from(first_seen)
+                .where(first_seen.c.first >= cutoff)
+            ).one()
         by_type = {ActivityType(int(r[0])): int(r[2]) for r in rows}
         total_events = sum(int(r[2]) for r in rows)
         total_users = ctx.users.count()
@@ -124,6 +143,8 @@ class UserActivityService:
             active_users=active_users,
             total_events=total_events,
             by_type=by_type,
+            mau=int(mau),
+            new_users=int(new_users),
         )
 
     def get_admin_dau(self, days: int) -> List[DailyActiveUsers]:
@@ -154,6 +175,104 @@ class UserActivityService:
             DailyTypeCount(date=r[0], activity_type=ActivityType(int(r[1])), events=int(r[2]))
             for r in rows
         ]
+
+    def get_admin_hourly_heatmap(
+        self, days: int, tz_offset_minutes: int = 0
+    ) -> List[HourlyActivityCell]:
+        """Activity volume bucketed by day-of-week x hour-of-day.
+
+        Buckets are derived from each record's ``updated_at`` (the last-touched
+        time), so this is a proxy for *when* users are active rather than a true
+        event log. Useful for spotting low-traffic windows for deployments.
+
+        The day/hour split is computed with portable integer epoch arithmetic so
+        it behaves identically on SQLite and PostgreSQL. ``tz_offset_minutes`` is
+        added to UTC before bucketing so the grid reflects the viewer's local time
+        (matching JS ``-Date.getTimezoneOffset()``).
+        """
+        cutoff = self._cutoff(days)
+        # seconds since epoch, shifted into the requested timezone
+        secs = sq.col(UserActivity.updated_at) / sq.literal(1000) + sq.literal(
+            tz_offset_minutes * 60
+        )
+        hour = ((secs / sq.literal(3600)) % sq.literal(24)).label("hour")
+        # epoch day 0 (1970-01-01) was a Thursday; +4 aligns 0 to Sunday
+        dow = (((secs / sq.literal(86400)) + sq.literal(4)) % sq.literal(7)).label("dow")
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(dow, hour, sq.func.count())
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(dow, hour)
+            ).all()
+        return [
+            HourlyActivityCell(
+                dow=int(r[0]),
+                hour=int(r[1]),
+                events=int(r[2]),
+            )
+            for r in rows
+        ]
+
+    def get_admin_top_novels(self, days: int, limit: int = 20) -> List[TopNovelActivity]:
+        """Most-visited novels (original + translated reads), ranked by visits."""
+        cutoff = self._cutoff(days)
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(
+                    UserActivity.target_id,
+                    sq.func.sum(UserActivity.visit_count),
+                    sq.func.count(sq.distinct(UserActivity.user_id)),
+                )
+                .where(
+                    UserActivity.updated_at >= cutoff,
+                    sq.col(UserActivity.activity_type).in_(
+                        [ActivityType.NOVEL, ActivityType.NOVEL_TRANSLATION]
+                    ),
+                )
+                .group_by(UserActivity.target_id)
+                .order_by(sq.func.sum(UserActivity.visit_count).desc())
+                .limit(limit)
+            ).all()
+            # batch-load titles for the ranked novels in the same session
+            novel_ids = [r[0] for r in rows]
+            titles = {
+                n.id: n.title
+                for n in sess.exec(sq.select(Novel).where(sq.col(Novel.id).in_(novel_ids))).all()
+            }
+        return [
+            TopNovelActivity(
+                novel_id=r[0],
+                title=titles.get(r[0], "(deleted)"),
+                visits=int(r[1]),
+                readers=int(r[2]),
+            )
+            for r in rows
+        ]
+
+    def get_admin_engagement(self, days: int) -> List[EngagementBucket]:
+        """Distribution of active users by how many events they generated."""
+        cutoff = self._cutoff(days)
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(sq.func.sum(UserActivity.visit_count))
+                .where(UserActivity.updated_at >= cutoff)
+                .group_by(UserActivity.user_id)
+            ).all()
+        labels = ["1", "2-5", "6-20", "21-50", "50+"]
+        counts = {label: 0 for label in labels}
+        for row in rows:
+            events = int(row if not isinstance(row, tuple) else row[0])
+            if events <= 1:
+                counts["1"] += 1
+            elif events <= 5:
+                counts["2-5"] += 1
+            elif events <= 20:
+                counts["6-20"] += 1
+            elif events <= 50:
+                counts["21-50"] += 1
+            else:
+                counts["50+"] += 1
+        return [EngagementBucket(bucket=label, users=counts[label]) for label in labels]
 
     def get_admin_top_users(self, days: int, limit: int = 20) -> List[TopUserActivity]:
         """Users ranked by total visit_count; enriched with name/email."""

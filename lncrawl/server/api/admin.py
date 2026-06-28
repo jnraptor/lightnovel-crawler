@@ -10,7 +10,10 @@ from ..models import (
 from ..models.activity import (
     DailyActiveUsers,
     DailyTypeCount,
+    EngagementBucket,
     GlobalActivitySummary,
+    HourlyActivityCell,
+    TopNovelActivity,
     TopUserActivity,
 )
 
@@ -63,7 +66,15 @@ def patch_configs(
     ctx.admin.update_config(body)
 
 
-ActivityDataType = Literal["summary", "dau", "type-trend", "top-users"]
+ActivityDataType = Literal[
+    "summary",
+    "dau",
+    "type-trend",
+    "top-users",
+    "top-novels",
+    "engagement",
+    "hourly-heatmap",
+]
 
 
 @router.get("/activity", summary="Get admin activity dashboard data", response_model=None)
@@ -71,8 +82,20 @@ def get_activity_data(
     type: ActivityDataType = Query(..., description="Which dataset to return"),
     days: int = Query(default=30, ge=1, le=365),
     limit: int = Query(default=20, ge=1, le=100),  # only used when type="top-users"
+    tz_offset: int = Query(
+        default=0,
+        ge=-720,
+        le=840,
+        description="Minutes to add to UTC for hourly-heatmap bucketing (= -Date.getTimezoneOffset())",
+    ),
 ) -> Union[
-    GlobalActivitySummary, List[DailyActiveUsers], List[DailyTypeCount], List[TopUserActivity]
+    GlobalActivitySummary,
+    List[DailyActiveUsers],
+    List[DailyTypeCount],
+    List[TopUserActivity],
+    List[TopNovelActivity],
+    List[EngagementBucket],
+    List[HourlyActivityCell],
 ]:
     if type == "summary":
         return ctx.activity.get_admin_summary(days)
@@ -80,5 +103,11 @@ def get_activity_data(
         return ctx.activity.get_admin_dau(days)
     elif type == "type-trend":
         return ctx.activity.get_admin_type_trend(days)
+    elif type == "top-novels":
+        return ctx.activity.get_admin_top_novels(days, limit)
+    elif type == "engagement":
+        return ctx.activity.get_admin_engagement(days)
+    elif type == "hourly-heatmap":
+        return ctx.activity.get_admin_hourly_heatmap(days, tz_offset)
     else:
         return ctx.activity.get_admin_top_users(days, limit)
