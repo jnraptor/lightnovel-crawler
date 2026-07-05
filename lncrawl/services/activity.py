@@ -119,6 +119,11 @@ class UserActivityService:
                     UserActivity.updated_at >= cutoff
                 )
             ).one()
+            dau = sess.exec(
+                sq.select(sq.func.count(sq.distinct(UserActivity.user_id))).where(
+                    UserActivity.updated_at >= self._cutoff(1)
+                )
+            ).one()
             mau = sess.exec(
                 sq.select(sq.func.count(sq.distinct(UserActivity.user_id))).where(
                     UserActivity.updated_at >= self._cutoff(30)
@@ -143,6 +148,7 @@ class UserActivityService:
             active_users=active_users,
             total_events=total_events,
             by_type=by_type,
+            dau=int(dau),
             mau=int(mau),
             new_users=int(new_users),
         )
@@ -186,18 +192,21 @@ class UserActivityService:
         event log. Useful for spotting low-traffic windows for deployments.
 
         The day/hour split is computed with portable integer epoch arithmetic so
-        it behaves identically on SQLite and PostgreSQL. ``tz_offset_minutes`` is
-        added to UTC before bucketing so the grid reflects the viewer's local time
-        (matching JS ``-Date.getTimezoneOffset()``).
+        it behaves identically on SQLite and PostgreSQL. Floor division (``//``)
+        keeps the buckets integer; SQLAlchemy's ``/`` is true division and yields
+        floats, which would put every record in its own bucket and defeat the
+        GROUP BY. ``tz_offset_minutes`` is added to UTC before bucketing so the
+        grid reflects the viewer's local time (matching JS
+        ``-Date.getTimezoneOffset()``).
         """
         cutoff = self._cutoff(days)
         # seconds since epoch, shifted into the requested timezone
-        secs = sq.col(UserActivity.updated_at) / sq.literal(1000) + sq.literal(
+        secs = sq.col(UserActivity.updated_at) // sq.literal(1000) + sq.literal(
             tz_offset_minutes * 60
         )
-        hour = ((secs / sq.literal(3600)) % sq.literal(24)).label("hour")
+        hour = ((secs // sq.literal(3600)) % sq.literal(24)).label("hour")
         # epoch day 0 (1970-01-01) was a Thursday; +4 aligns 0 to Sunday
-        dow = (((secs / sq.literal(86400)) + sq.literal(4)) % sq.literal(7)).label("dow")
+        dow = (((secs // sq.literal(86400)) + sq.literal(4)) % sq.literal(7)).label("dow")
         with ctx.db.session() as sess:
             rows = sess.exec(
                 sq.select(dow, hour, sq.func.count())
