@@ -5,9 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.12.0] - 2026-07-14
+
+### Added
+
+- **Novel list filtering** — `GET /api/novels` gains sort modes (`popular`, `updated`, `created`, `chapters`, `title_asc`, `title_desc`) via a new `NovelSort` enum, backed by a `novel_popularity` migration and activity-derived popularity scoring
+- **Per-novel tags** — tag attachments now live in a dedicated `NovelTag` table (new `novel_tags` migration) instead of being embedded, with supporting DAO/service changes across `tags.py`, `novels.py`, and `crawler.py`
+- **CLI resume & rate limit** (#3105) — `lncrawl crawl` gains `--resume`/`--missing` to download only not-yet-crawled chapters and `--rate-limit` to throttle requests; `--resume` and `--refresh` are mutually exclusive
+- **`novelarrow.com`** — new source crawler
+
+### Changed
+
+- **Enums stored as plain scalars** — DAO models no longer use native DB enum types; enum columns are stored as plain scalars, removing the need for Postgres enum-sync migrations (new `drop_native_enums` migration)
+- **Dialect-split schema evolution** — `services/db.py` schema evolution is now split by dialect, and the SQLite DB is rebuilt from the current models while preserving data
+- **Sources list not cached** — `GET /api/sources` no longer caches its response
+
+### Fixed
+
+- **`novelfull`** — stop downloading duplicate "half" chapters, and drop an unnecessary `soup.decompose` call in chapter-body parsing
+- **Source language generation** — corrected language derivation in the sources helper
+
+## [4.11.0] - 2026-07-09
+
+### Added
+
+- **Continue reading** — a new history endpoint and supporting `HistoryService` logic surface the most recent in-progress chapter so readers can resume where they left off; new response models under `server/models/history.py`
+- **Library covers** — a library now displays the first available novel cover as its cover image; `LibraryService` and the library DAO/response models updated accordingly
+- **Daily active users** — `GlobalActivitySummary` gains a `dau` field alongside `mau`, and admin usage is aggregated by hour with day-of-week bucketing
+
+### Changed
+
+- **Recommendation service** — improved recommendation logic and wiring across `recommendations.py`, `novels.py`, and `crawler.py`
+- **Job dependency handling** — `FETCH_LATEST` jobs now respect dependencies; pending-job retrieval refactored (dropped the `skip_domains` parameter)
+- **Activity retention** — `Scrubber` deletes `UserActivity` records older than 90 days
+
+### Fixed
+
+- **`lightnovelstranslations.com`** (#3067) — stop prepending the scraper origin to an already-absolute novel URL, which produced a malformed 404ing URL
+- **Chapter history** — corrected chapter history addition
+- **SQLAlchemy 2.0** — fixed usage list compatibility
+
 ## [4.10.0] - 2026-06-28
 
-<!-- TBD -->
+### Added
+
+- **Activity heatmap** — hourly usage heatmap bucketing events by day-of-week × hour-of-day using portable integer epoch math (identical on SQLite and PostgreSQL) and shifted by a `tz_offset` query param to reflect the viewer's local time, plus additional activity-dashboard metrics — useful for spotting low-traffic deploy/maintenance windows
+- **One runner per domain** — the job scheduler now guarantees a single runner processes a given domain at a time; new `job_domain` migration with supporting DAO/service logic
+- **GitHub feedback** — feedback is submitted directly as GitHub issues via `utils/github.py`; the local `feedback` table is dropped (new migration)
+
+### Changed
+
+- **DB schema validation reworked** — schema validation now runs through `services/db.py` on startup, with a dev `migrate` command and a lint-workflow hook
+- **Job runner hardening** — added a drain loop and failure safety net, consolidated queue claims, only cancels stuck jobs on runner reset, rests between iterations, and runs `gc` during scheduler reset
+- **`openai` moved to a dev dependency**; CI workflows optimized
+- **Updated `lncrawl-scraper`**
+
+### Fixed
+
+- **`freewebnovel`** (#3060) — source corrected
+- Assorted cleanup and minor fixes across the crawler, binder, mail, and static-file middleware
 
 ## [4.9.0] - 2026-06-20
 

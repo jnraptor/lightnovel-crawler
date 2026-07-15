@@ -4,21 +4,24 @@ from typing import Any, Dict, List, Optional
 import sqlmodel as sq
 
 from ..context import ctx
-from ..dao import LanguageCode, Novel, NovelTranslation
+from ..dao import LanguageCode, Novel, NovelSort, NovelTag, NovelTranslation
 from ..exceptions import ServerErrors
 from ..server.models import Paginated
 
 
 class NovelService:
-    def __init__(self) -> None:
-        pass
-
     def list(
         self,
         search: str = "",
         offset: int = 0,
         limit: int = 20,
         domain: str = "",
+        language: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        manga: Optional[bool] = None,
+        mtl: Optional[bool] = None,
+        min_chapters: int = 0,
+        sort: NovelSort = NovelSort.updated,
     ) -> Paginated[Novel]:
         with ctx.db.session() as sess:
             stmt = sq.select(Novel)
@@ -31,7 +34,35 @@ class NovelService:
                 conditions.append(sq.col(Novel.url).ilike(f"%{domain}%"))
 
             if search:
-                conditions.append(sq.col(Novel.title).ilike(f"%{search}%"))
+                conditions.append(
+                    sq.or_(
+                        sq.col(Novel.title).ilike(f"%{search}%"),
+                        sq.col(Novel.authors).ilike(f"%{search}%"),
+                        sq.col(Novel.synopsis).ilike(f"%{search}%"),
+                    )
+                )
+
+            if language:
+                conditions.append(sq.col(Novel.language) == language)
+
+            if manga is not None:
+                conditions.append(sq.col(Novel.manga).is_(manga))
+            if mtl is not None:
+                conditions.append(sq.col(Novel.mtl).is_(mtl))
+
+            if min_chapters > 0:
+                conditions.append(sq.col(Novel.chapter_count) >= min_chapters)
+
+            if tags:
+                # Match all selected tags via the indexed association table.
+                wanted = sorted(set(tags))
+                tag_match = (
+                    sq.select(NovelTag.novel_id)
+                    .where(sq.col(NovelTag.tag_name).in_(wanted))
+                    .group_by(NovelTag.novel_id)
+                    .having(sq.func.count(sq.col(NovelTag.tag_name)) == len(wanted))
+                )
+                conditions.append(sq.col(Novel.id).in_(tag_match))
 
             if conditions:
                 cnd = sq.and_(*conditions)
@@ -39,7 +70,21 @@ class NovelService:
                 cnt = cnt.where(cnd)
 
             # Apply sorting
-            stmt = stmt.order_by(sq.desc(Novel.updated_at))
+            if sort == NovelSort.popular:
+                stmt = stmt.order_by(
+                    sq.desc(Novel.popularity),
+                    sq.desc(Novel.updated_at),
+                )
+            elif sort == NovelSort.created:
+                stmt = stmt.order_by(sq.desc(Novel.created_at))
+            elif sort == NovelSort.chapters:
+                stmt = stmt.order_by(sq.desc(Novel.chapter_count))
+            elif sort == NovelSort.title_asc:
+                stmt = stmt.order_by(sq.asc(Novel.title))
+            elif sort == NovelSort.title_desc:
+                stmt = stmt.order_by(sq.desc(Novel.title))
+            else:
+                stmt = stmt.order_by(sq.desc(Novel.updated_at))
 
             # Apply pagination
             stmt = stmt.offset(offset).limit(limit)
@@ -53,6 +98,18 @@ class NovelService:
                 limit=limit,
                 items=list(items),
             )
+
+    def list_tags(self) -> Dict[str, int]:
+        with ctx.db.session() as sess:
+            rows = sess.exec(
+                sq.select(NovelTag.tag_name, sq.func.count())
+                .group_by(NovelTag.tag_name)
+                .order_by(
+                    sq.desc(sq.func.count()),
+                    sq.asc(NovelTag.tag_name),
+                )
+            ).all()
+        return {name: count for name, count in rows}
 
     def list_domains(self) -> Dict[str, int]:
         with ctx.db.session() as sess:
@@ -105,6 +162,11 @@ class NovelService:
             novel = sess.get(Novel, novel_id)
             if not novel:
                 return True
+            sess.exec(
+                sq.delete(NovelTag).where(
+                    sq.col(NovelTag.novel_id) == novel_id,
+                )
+            )
             sess.delete(novel)
             sess.commit()
         ctx.recommendations.invalidate(novel_id)

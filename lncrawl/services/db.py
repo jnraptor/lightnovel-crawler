@@ -76,33 +76,245 @@ class DB:
     # ------------------------------------------------------------------ #
 
     def bootstrap(self, reset_on_failure: bool = False):
+        # Schema evolution is split by dialect. SQLite (single-user CLI/desktop)
+        # never executes migration scripts at runtime: a fresh DB is built
+        # straight from the models and an existing DB is reconciled additively.
+        # This keeps CLI startup near-free and immune to migration-replay bugs.
+        # Server dialects (Postgres/MySQL, multi-user, unrecoverable data) keep
+        # real Alembic migrations. See the `db-migration` skill for the rules.
         self._ensure_database()
+
+        if not self.has_any_tables():
+            self._bootstrap_fresh()
+        elif self.engine.dialect.name == "sqlite":
+            self._bootstrap_sqlite()
+        else:
+            self._bootstrap_server(reset_on_failure)
+
+    def _bootstrap_fresh(self):
+        """Build the current schema directly from models, skipping history."""
+        SQLModel.metadata.create_all(self.engine)
+        self._stamp_head()
+        if self.engine.dialect.name == "sqlite":
+            self._set_sqlite_user_version(self._schema_fingerprint())
+        logger.info("Database initialized from models.")
+
+    def _bootstrap_sqlite(self):
+        """Reconcile an existing SQLite database with the models, no scripts.
+
+        A fingerprint of the models is cached in SQLite's ``user_version``;
+        when it matches, startup is a single PRAGMA read with no Alembic import.
+        On a mismatch the schema is synced additively (see ``_sync_sqlite_schema``).
+        """
+        fingerprint = self._schema_fingerprint()
+        if self._sqlite_user_version() == fingerprint:
+            return  # fast path: schema already matches the models
+
+        logger.info("Schema changed; reconciling SQLite database with models.")
+        backup = self._backup_database()
+        try:
+            self._sync_sqlite_schema()
+            self._normalize_enum_values()
+        except Exception:
+            logger.exception("Schema reconciliation failed.")
+            self._restore_database(backup)
+            raise
+        else:
+            self._set_sqlite_user_version(fingerprint)
+            self._discard_backup(backup)
+
+    def _normalize_enum_values(self) -> None:
+        """Rewrite legacy enum rows that stored the member name as an integer.
+
+        IntEnum columns used to be persisted by name (e.g. ``status='SUCCESS'``);
+        they are now stored by value. Migration scripts handle this on the server,
+        but SQLite reconciles at runtime, so convert any lingering name strings
+        here. Idempotent: once converted, the WHERE clauses match nothing.
+        """
+        from ..dao._enum import IntEnumType
+
+        columns = [
+            (table.name, col.name, col.type.enum_class)
+            for table in SQLModel.metadata.sorted_tables
+            for col in table.columns
+            if isinstance(col.type, IntEnumType)
+        ]
+        if not columns:
+            return
+        with self.engine.begin() as conn:
+            for table, column, enum_class in columns:
+                for member in enum_class:
+                    conn.exec_driver_sql(
+                        f'UPDATE "{table}" SET "{column}" = ? WHERE "{column}" = ?',
+                        (int(member.value), member.name),
+                    )
+
+    def _bootstrap_server(self, reset_on_failure: bool = False):
+        """Run real Alembic migrations for Postgres/MySQL deployments."""
         from alembic import command
 
         base = self.base_revision()
-        if base and self.has_any_tables() and not self.current_revision():
+        if base and not self.current_revision():
             command.stamp(self.alembic_config, base)
 
-        # Back up the database before running pending migrations so a buggy
-        # migration can never destroy a self-hoster's library. Only SQLite is
-        # backed up (single file, near-free); skipped when already at head.
-        backup = None
-        if self.current_revision() != self.latest_revision():
-            backup = self._backup_database()
+        if self.current_revision() == self.latest_revision():
+            return  # already at head; never auto-downgrade if DB is ahead
 
         try:
             command.upgrade(self.alembic_config, "head")
-            logger.info("Database bootstrap successful.")
-            self._verify_schema()
+            logger.info("Database migrations applied.")
         except Exception:
-            logger.exception("Database bootstrap failed.")
-            # Prefer restoring the pre-migration backup over dropping data.
-            if self._restore_database(backup):
-                raise
+            logger.exception("Database migration failed.")
             if not reset_on_failure:
                 raise
             self._reset_database()
             self.bootstrap()
+
+    def _stamp_head(self):
+        from alembic import command
+
+        command.stamp(self.alembic_config, "head")
+
+    # ------------------------------------------------------------------ #
+    #                     SQLite schema reconciliation                    #
+    # ------------------------------------------------------------------ #
+
+    def _schema_fingerprint(self) -> int:
+        """Stable 31-bit fingerprint of the model schema (table/column names).
+
+        Changes whenever a table or column is added/removed/retyped, which is
+        exactly when SQLite needs reconciling. Fits SQLite's signed 32-bit
+        ``user_version``.
+        """
+        import hashlib
+
+        parts = []
+        for table in sorted(SQLModel.metadata.tables.values(), key=lambda t: t.name):
+            cols = ",".join(sorted(f"{c.name}:{c.type}" for c in table.columns))
+            parts.append(f"{table.name}({cols})")
+        digest = hashlib.sha256("|".join(parts).encode()).digest()
+        return int.from_bytes(digest[:4], "big") & 0x7FFFFFFF
+
+    def _sqlite_user_version(self) -> Optional[int]:
+        with self.engine.connect() as conn:
+            return conn.exec_driver_sql("PRAGMA user_version").scalar()
+
+    def _set_sqlite_user_version(self, value: int) -> None:
+        # PRAGMA does not accept bound parameters; value is a validated int.
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {int(value)}")
+
+    def _sync_sqlite_schema(self) -> None:
+        """Apply only additive schema differences (create tables/columns/indexes).
+
+        Drops and type changes are skipped: SQLite is dynamically typed so type
+        changes are irrelevant, and skipping drops is what makes running an older
+        app against a newer database non-destructive. Non-additive intent (renames,
+        backfills) is carried by server migration scripts only; on SQLite it
+        degrades to additive (stale columns remain, re-crawl to refresh).
+        """
+        from alembic.autogenerate import compare_metadata
+        from alembic.runtime.migration import MigrationContext
+
+        with self.engine.connect() as conn:
+            mc = MigrationContext.configure(conn, opts={"compare_type": lambda *a: False})
+            diff = list(compare_metadata(mc, SQLModel.metadata))
+
+        added_tables: list[str] = []
+        added_columns: list[str] = []
+        skipped: list[str] = []
+        for op in diff:
+            # alembic groups index/fk diffs inside a single-element list
+            for entry in op if isinstance(op, list) else [op]:
+                if not (isinstance(entry, tuple) and entry):
+                    skipped.append(self._format_drift(entry))
+                    continue
+                kind = entry[0]
+                if kind == "add_table":
+                    entry[1].create(self.engine, checkfirst=True)
+                    added_tables.append(entry[1].name)
+                elif kind == "add_column":
+                    table_name, column = entry[2], entry[3]
+                    self._sqlite_add_column(table_name, column)
+                    added_columns.append(f"{table_name}.{column.name}")
+                elif kind == "add_index":
+                    entry[1].create(self.engine, checkfirst=True)
+                else:
+                    skipped.append(self._format_drift(entry))
+
+        if added_tables:
+            logger.info(f"Added tables: {', '.join(added_tables)}")
+        if added_columns:
+            logger.info(f"Added columns: {', '.join(added_columns)}")
+        if skipped:
+            # Non-additive drift (extra columns from a newer app, renames, type
+            # changes) is left untouched so old and new apps coexist safely.
+            logger.info(f"Skipped {len(skipped)} non-additive schema difference(s).")
+
+    def _sqlite_add_column(self, table_name: str, column) -> None:
+        # Always add as NULLable: existing rows have no value, and SQLModel
+        # supplies one on every insert, so nullability in the DB is harmless.
+        col_type = column.type.compile(dialect=self.engine.dialect)
+        ddl = f'ALTER TABLE "{table_name}" ADD COLUMN "{column.name}" {col_type}'
+        default = getattr(column.server_default, "arg", None)
+        default_sql = getattr(default, "text", default)
+        if default_sql is not None:
+            ddl += f" DEFAULT {default_sql}"
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql(ddl)
+
+    def rebuild(self) -> None:
+        """Rebuild the SQLite database from the current models, preserving data.
+
+        The escape hatch for a *destructive* schema change (rename, type change,
+        column split) that additive sync cannot apply. Every table is dropped and
+        recreated from the models; rows are copied back column-by-column, keeping
+        only columns that still exist. Columns that were dropped/renamed are left
+        behind; new columns take their default. The copy is done at the raw driver
+        level so stored values (including JSON `extra`) are preserved verbatim
+        rather than re-serialized. A backup is taken and restored on any failure.
+        """
+        if self.engine.dialect.name != "sqlite":
+            raise RuntimeError("rebuild is only supported for SQLite databases")
+
+        from sqlalchemy import MetaData
+
+        backup = self._backup_database()
+        try:
+            # Snapshot every existing row at the driver level (no type coercion).
+            reflected = MetaData()
+            reflected.reflect(bind=self.engine)
+            snapshot: dict[str, tuple[list[str], list]] = {}
+            with self.engine.connect() as conn:
+                for name in reflected.tables:
+                    cur = conn.exec_driver_sql(f'SELECT * FROM "{name}"')
+                    snapshot[name] = ([str(k) for k in cur.keys()], list(cur.fetchall()))
+
+            # Rebuild the schema from the models.
+            reflected.drop_all(self.engine)
+            SQLModel.metadata.create_all(self.engine)
+
+            # Copy rows back, keeping only columns that still exist.
+            restored = 0
+            with self.engine.begin() as conn:
+                for table in SQLModel.metadata.sorted_tables:
+                    old_keys, rows = snapshot.get(table.name, ([], []))
+                    if not rows:
+                        continue
+                    keep = [k for k in old_keys if k in table.columns]
+                    idx = [old_keys.index(k) for k in keep]
+                    columns = ", ".join(f'"{k}"' for k in keep)
+                    placeholders = ", ".join("?" for _ in keep)
+                    sql = f'INSERT INTO "{table.name}" ({columns}) VALUES ({placeholders})'
+                    conn.exec_driver_sql(sql, [tuple(row[i] for i in idx) for row in rows])
+                    restored += len(rows)
+
+            self._set_sqlite_user_version(self._schema_fingerprint())
+            logger.info(f"Database rebuilt from models; {restored} row(s) preserved.")
+        except Exception:
+            logger.exception("Database rebuild failed.")
+            self._restore_database(backup)
+            raise
         else:
             self._discard_backup(backup)
 
