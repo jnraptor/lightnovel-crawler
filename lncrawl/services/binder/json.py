@@ -24,7 +24,11 @@ def make_json(working_dir: Path, artifact: Artifact, signal=Event(), **kwargs) -
     with zipfile.ZipFile(tmp_file, "w", zipfile.ZIP_DEFLATED) as zipf:
         if signal.is_set():
             raise AbortedException()
-        for volume in ctx.volumes.list(artifact.novel_id, language=language):
+        if artifact.volume is not None:
+            volumes = [ctx.volumes.find_translated(artifact.novel_id, artifact.volume, language)]
+        else:
+            volumes = ctx.volumes.list(artifact.novel_id, language=language)
+        for volume in volumes:
             vol_data = volume.model_dump()
             vol_data["chapters"] = []
             novel_data["volumes"].append(vol_data)

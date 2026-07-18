@@ -1,6 +1,7 @@
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Body, Form, Query, Security
+from fastapi import APIRouter, Body, Form, Query, Response, Security
+from fastapi.security import HTTPAuthorizationCredentials
 
 from ...context import ctx
 from ...dao import ActivityType, User, UserToken
@@ -16,8 +17,9 @@ from ..models import (
     SignupRequest,
     TokenResponse,
     UpdateRequest,
+    UserActivityStats,
 )
-from ..security import ensure_user
+from ..security import bearer_auth, ensure_user
 
 # The root router
 router = APIRouter()
@@ -55,10 +57,23 @@ def signup(
 
 @router.get("/me", summary="Get current user details")
 def me(
+    response: Response,
     user: User = Security(ensure_user),
+    bearer: Optional[HTTPAuthorizationCredentials] = Security(bearer_auth),
 ) -> User:
     ctx.activity.record(user.id, ActivityType.ACCOUNT, user.id)
+    if bearer:
+        refreshed = ctx.users.refresh_token(bearer.credentials)
+        if refreshed:
+            response.headers["X-Refresh-Token"] = refreshed
     return user
+
+
+@router.get("/me/stats", summary="Get current user's activity stats")
+def my_stats(
+    user: User = Security(ensure_user),
+) -> UserActivityStats:
+    return ctx.activity.get_user_stats(user.id)
 
 
 @router.delete("/me", summary="Deactivate current user")

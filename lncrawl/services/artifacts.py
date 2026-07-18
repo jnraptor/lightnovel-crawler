@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from sqlmodel import and_, asc, desc, func, select
+import sqlmodel as sq
 
 from ..context import ctx
 from ..dao import Artifact, LanguageCode, OutputFormat, User, UserRole
@@ -21,9 +21,10 @@ class ArtifactService:
         novel_id: Optional[str] = None,
         format: Optional[OutputFormat] = None,
         language: Optional[LanguageCode] = None,
+        volume: Optional[int] = None,
     ) -> Paginated[Artifact]:
         with ctx.db.session() as sess:
-            stmt = select(Artifact)
+            stmt = sq.select(Artifact)
 
             # Apply filters
             if novel_id:
@@ -36,11 +37,13 @@ class ArtifactService:
                 stmt = stmt.where(Artifact.format == format)
             if language:
                 stmt = stmt.where(Artifact.language == language)
+            if volume is not None:
+                stmt = stmt.where(Artifact.volume == volume)
 
             # Apply sorting
-            stmt = stmt.order_by(desc(Artifact.updated_at))
+            stmt = stmt.order_by(sq.desc(Artifact.updated_at))
 
-            total = sess.exec(select(func.count()).select_from(Artifact)).one()
+            total = sess.exec(sq.select(sq.func.count()).select_from(Artifact)).one()
             items = sess.exec(stmt.offset(offset).limit(limit)).all()
 
             return Paginated(
@@ -72,43 +75,69 @@ class ArtifactService:
     def get_epub(self, depends_on_job_id: str) -> Artifact:
         with ctx.db.session() as sess:
             artifact = sess.exec(
-                select(Artifact).where(Artifact.job_id == depends_on_job_id)
+                sq.select(Artifact).where(Artifact.job_id == depends_on_job_id)
             ).first()
             if not artifact or not artifact.is_available:
                 raise ServerErrors.no_epub_file
             return artifact
 
-    def list_latest(self, novel_id: str, language: Optional[LanguageCode] = None) -> List[Artifact]:
+    def list_latest(
+        self,
+        novel_id: str,
+        language: Optional[LanguageCode] = None,
+        volume: Optional[int] = None,
+    ) -> List[Artifact]:
         with ctx.db.session() as sess:
             subq = (
-                select(Artifact.format, func.max(Artifact.updated_at).label("max_updated_at"))
+                sq.select(Artifact.format, sq.func.max(Artifact.updated_at).label("max_updated_at"))
                 .where(
                     Artifact.novel_id == novel_id,
                     Artifact.language == language,
+                    self._volume_filter(volume),
                 )
                 .group_by(Artifact.format)
                 .subquery()
             )
             rows = sess.exec(
-                select(Artifact)
+                sq.select(Artifact)
                 .join(
                     subq,
-                    and_(
+                    sq.and_(
                         Artifact.format == subq.c.format,
                         Artifact.updated_at == subq.c.max_updated_at,
                     ),
                 )
-                .order_by(asc(Artifact.format))
+                # re-apply the same filters on the outer row so a different
+                # novel/language/volume sharing (format, updated_at) can't leak in
+                .where(
+                    Artifact.novel_id == novel_id,
+                    Artifact.language == language,
+                    self._volume_filter(volume),
+                )
+                .order_by(sq.asc(Artifact.format))
             ).all()
             return list(rows)
 
-    def get_latest(self, novel_id: str, format: OutputFormat) -> Optional[Artifact]:
+    def get_latest(
+        self,
+        novel_id: str,
+        format: OutputFormat,
+        volume: Optional[int] = None,
+    ) -> Optional[Artifact]:
         with ctx.db.session() as sess:
             artifact = sess.exec(
-                select(Artifact)
+                sq.select(Artifact)
                 .where(Artifact.novel_id == novel_id)
                 .where(Artifact.format == format)
-                .order_by(desc(Artifact.updated_at))
+                .where(self._volume_filter(volume))
+                .order_by(sq.desc(Artifact.updated_at))
                 .limit(1)
             ).first()
             return artifact
+
+    @staticmethod
+    def _volume_filter(volume: Optional[int]):
+        """Match a specific volume when given, else whole-novel artifacts only."""
+        if volume is not None:
+            return Artifact.volume == volume
+        return sq.col(Artifact.volume).is_(None)
