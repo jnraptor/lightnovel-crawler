@@ -31,7 +31,7 @@ def _init_crawl_sync(url: str) -> dict:
     if getattr(crawler, "can_login", False):
         logger.warning("Source supports login but Discord bot does not provide credentials")
 
-    novel = ctx.crawler.fetch_novel(user.id, url, crawler=crawler)
+    novel = ctx.crawler.fetch_novel(user.id, url, custom=crawler)
 
     if novel.chapter_count == 0:
         return {"error": "No chapters to download"}
@@ -80,7 +80,7 @@ def _download_chapters_sync(user_id: str, crawler, chapters: list) -> dict:
             ctx.crawler.fetch_chapter,
             user_id,
             chapter_id,
-            crawler=crawler,
+            custom=crawler,
         )
         for chapter_id in chapters
     ]
@@ -102,7 +102,7 @@ def _download_images_sync(user_id: str, crawler, image_ids: list) -> dict:
             ctx.crawler.fetch_image,
             user_id,
             image_id,
-            crawler=crawler,
+            custom=crawler,
         )
         for image_id in image_ids
     ]
@@ -305,6 +305,8 @@ class LightnovelBot(commands.Bot):
                     await asyncio.to_thread(_download_images_sync, user_id, crawler, image_ids)
                 except Exception:
                     logger.error("Image download failed", exc_info=True)
+
+            crawler.close()
 
             await interaction.followup.send("📚 Generating ebook...")
             try:
