@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Path, Query, Security
+from fastapi import APIRouter, Body, Path, Query, Security
 
 from ...context import ctx
 from ...dao import (
@@ -13,6 +13,7 @@ from ...dao import (
     User,
     Volume,
 )
+from ...exceptions import ServerErrors
 from ..models import Paginated
 from ..security import ensure_admin, ensure_user
 
@@ -117,6 +118,28 @@ async def get_novel_artifacts(
     return ctx.artifacts.list_latest(novel_id, language, volume)
 
 
+@router.get("/{novel_id}/glossaries", summary="Gets translation glossaries by language")
+def get_novel_glossaries(
+    novel_id: str = Path(),
+    language: Optional[LanguageCode] = Query(default=None),
+) -> Dict[str, Dict[str, str]]:
+    return ctx.novels.list_glossaries(novel_id, language)
+
+
+@router.put("/{novel_id}/glossary", summary="Replaces the translation glossary of a language")
+def update_novel_glossary(
+    novel_id: str = Path(),
+    language: LanguageCode = Query(),
+    terms: Dict[str, str] = Body(),
+    user: User = Security(ensure_user),
+) -> Dict[str, str]:
+    # Glossary terms are injected into translations, so editing is gated the
+    # same way as requesting a translation.
+    if not ctx.tier.translation_enabled(user):
+        raise ServerErrors.tier_not_allowed
+    return ctx.novels.update_glossary(novel_id, language, terms)
+
+
 @router.get("/{novel_id}/recommended", summary="Gets recommended novels based on similarity")
 def get_novel_recommended(
     novel_id: str = Path(),
@@ -127,11 +150,12 @@ def get_novel_recommended(
 
 @router.delete(
     "/{novel_id}",
-    summary="Removes a novel",
+    summary="Removes a novel, or only one translation of it when a language is given",
     dependencies=[Security(ensure_admin)],
 )
 def delete_novel(
     novel_id: str = Path(),
+    language: Optional[LanguageCode] = Query(default=None),
 ) -> bool:
-    ctx.novels.delete(novel_id)
+    ctx.novels.delete(novel_id, language)
     return True

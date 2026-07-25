@@ -27,6 +27,8 @@ class Crawler(ABC):
     can_login = False
     can_search = False
 
+    request_rate_limit: float = 3.0
+
     chapters_per_volume = 100
     auto_generate_cover = True
 
@@ -34,12 +36,19 @@ class Crawler(ABC):
     disable_reason = ""
     version = 0
 
+    @classmethod
+    def max_concurrency(cls) -> int:
+        if not cls.request_rate_limit:
+            return 1
+        rate = math.ceil(cls.request_rate_limit)
+        n = ctx.config.crawler.runner_concurrency
+        return max(1, min(rate, n))
+
     # ------------------------------------------------------------------------- #
     # Constructor & Destructors
     # ------------------------------------------------------------------------- #
     def __init__(
         self,
-        workers: Optional[int] = None,
         parser: Optional[str] = None,
         origin: Optional[str] = None,
     ) -> None:
@@ -48,7 +57,6 @@ class Crawler(ABC):
 
         Args:
         - origin (str): The origin URL of the source.
-        - workers (int, optional): Number of concurrent workers to expect.
         - parser (Optional[str], optional): Desirable features of the parser. This can be the name of a specific parser
             ("lxml", "lxml-xml", "html.parser", or "html5lib") or it may be the type of markup to be used ("html", "html5", "xml").
         """
@@ -63,9 +71,11 @@ class Crawler(ABC):
         from .taskman import TaskManager
 
         self.cleaner = TextCleaner()
-        self.taskman = TaskManager(workers=workers)
+        self.taskman = TaskManager(workers=self.max_concurrency())
 
         config = default_config()
+        if self.request_rate_limit:
+            config.min_request_interval_fast = 1.0 / self.request_rate_limit
         if ctx.config.crawler.enable_proxy:
             config.proxy.fallback_to_direct = ctx.config.crawler.allow_fallback_on_proxy_miss
             for url in ctx.config.crawler.proxy_urls.split(","):

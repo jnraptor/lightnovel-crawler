@@ -24,6 +24,10 @@ class _CommonSourceInfo(BaseModel):
     can_search: bool = Field(default=False, description="True if crawler supports search")
     has_mtl: bool = Field(default=False, description="True if source has machine translation")
 
+    request_rate_limit: float = Field(
+        default=3, description="Max requests per second to this source"
+    )
+
     total_commits: int = Field(default=1, description="Total number of commits")
     contributors: List[str] = Field(default=[], description="List of contributors")
 

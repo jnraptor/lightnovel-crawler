@@ -170,6 +170,19 @@ class ChapterService:
                 .limit(1)
             ).first()
 
+    def get_translated(
+        self,
+        chapter_id: str,
+        language: Optional[LanguageCode] = None,
+    ) -> Chapter:
+        chapter = self.get(chapter_id)
+        if language:
+            translation = self.get_chapter_translation(chapter, language)
+            if not translation:
+                raise ServerErrors.no_such_chapter.with_extra(language)
+            chapter.title = translation.chapter_title
+        return chapter
+
     def read(
         self,
         user: User,
@@ -192,12 +205,18 @@ class ChapterService:
             if not job:
                 job = ctx.jobs.fetch_chapter(user, chapter_id)
 
+        translation_engine: Optional[str] = None
         if language:
             content = None
             chapter_translation = self.get_chapter_translation(chapter, language)
             if chapter_translation and chapter_translation.is_available:
                 chapter.title = chapter_translation.chapter_title or chapter.title
                 content = ctx.files.load_text(chapter_translation.content_file)
+                translation_engine = chapter_translation.extra.get("engine")
+            elif not ctx.config.translator.enabled:
+                raise ServerErrors.translation_disabled
+            elif not ctx.tier.translation_enabled(user):
+                raise ServerErrors.tier_not_allowed
             elif auto_fetch:
                 fetch_job_id = job.id if job else None
                 translate_job = ctx.jobs.get_chapter_translation_job(user.id, chapter_id, language)
@@ -234,6 +253,7 @@ class ChapterService:
             content=content,
             language=language,
             word_count=word_count,
+            translation_engine=translation_engine,
             next_id=next_id,
             previous_id=previous_id,
         )

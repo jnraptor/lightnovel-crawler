@@ -325,56 +325,42 @@ class AppConfig(_Section):
 class TranslatorConfig(_Section):
     section = "translator"
 
-    @property
-    def microsoft_translator_key(self) -> Annotated[str, Sensitive]:
-        """Microsoft Translator API Key.
+    @cached_property
+    def config_file(self) -> str:
+        """Translator Config File.
 
-        Azure Cognitive Services key for the Translator resource. Free tier allows
-        2,000,000 characters per month. Get one from: https://portal.azure.com
+        Path of the embedded translator's YAML config (providers, API keys, engines,
+        routing). Managed through the translator dashboard; the file is created on
+        first change. Default lives in the app data directory.
         """
-        return self._get("microsoft_translator_key", "")
-
-    @microsoft_translator_key.setter
-    def microsoft_translator_key(self, v: str) -> None:
-        self._set("microsoft_translator_key", v)
+        return str(APP_DIR / "translator.yml")
 
     @property
-    def microsoft_translator_region(self) -> str:
-        """Microsoft Translator Region.
+    def enabled(self) -> bool:
+        """Enable Translation.
 
-        Azure region of your Translator resource, e.g. `eastus`. Required when using a
-        multi-service or regional key; leave empty for global keys.
+        Master switch for the whole translation feature. When off, translation jobs cannot be
+        started and the reader serves original content only; the translator admin dashboard stays
+        available so engines can still be configured. Enabled by default.
         """
-        return self._get("microsoft_translator_region", "")
+        return self._get("enabled", True)
 
-    @microsoft_translator_region.setter
-    def microsoft_translator_region(self, v: str) -> None:
-        self._set("microsoft_translator_region", v)
+    @enabled.setter
+    def enabled(self, v: bool) -> None:
+        self._set("enabled", bool(v))
 
     @property
-    def baidu_app_id(self) -> Annotated[str, Sensitive]:
-        """Baidu Translate App ID.
+    def request_timeout(self) -> int:
+        """Translator Request Timeout (seconds).
 
-        App ID for the Baidu Fanyi (translation) API. Particularly strong for Chinese,
-        Japanese, and Korean. Register at: https://fanyi-api.baidu.com
+        Maximum time to wait for a single translate request. Chapter translation can take
+        minutes on slow/local engines, so keep this high. Default is 900 (15 minutes).
         """
-        return self._get("baidu_app_id", "")
+        return int(self._get("request_timeout", 900))
 
-    @baidu_app_id.setter
-    def baidu_app_id(self, v: str) -> None:
-        self._set("baidu_app_id", v)
-
-    @property
-    def baidu_secret_key(self) -> Annotated[str, Sensitive]:
-        """Baidu Translate Secret Key.
-
-        Secret key that pairs with your Baidu Translate App ID.
-        """
-        return self._get("baidu_secret_key", "")
-
-    @baidu_secret_key.setter
-    def baidu_secret_key(self, v: str) -> None:
-        self._set("baidu_secret_key", v)
+    @request_timeout.setter
+    def request_timeout(self, v: int) -> None:
+        self._set("request_timeout", int(v))
 
 
 # ------------------------------------------------------------------ #
@@ -782,6 +768,20 @@ class ServerConfig(_Section):
     @token_expiry.setter
     def token_expiry(self, v: int) -> None:
         self._set("token_expiry_minutes", v)
+
+    @property
+    def session_max_lifetime(self) -> int:
+        """Maximum Session Lifetime.
+
+        Absolute cap on how long a single sign-in can be kept alive by refreshing,
+        in minutes, regardless of activity. Once passed the client must sign in again.
+        Set to `0` to disable the cap. Default is 30 days (`43200` minutes).
+        """
+        return self._get("session_max_lifetime_minutes", lambda: 30 * 24 * 60)
+
+    @session_max_lifetime.setter
+    def session_max_lifetime(self, v: int) -> None:
+        self._set("session_max_lifetime_minutes", v)
 
     @property
     def enable_browse_route(self) -> bool:

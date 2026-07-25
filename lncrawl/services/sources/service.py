@@ -4,7 +4,10 @@ from pathlib import Path
 import threading
 from threading import Event, Thread
 import traceback
-from typing import Dict, List, Optional, Type
+from typing import TYPE_CHECKING, Dict, List, Optional, Type
+
+if TYPE_CHECKING:
+    from scraper import SharedLimiter
 
 from ...context import ctx
 from ...core import Crawler
@@ -37,6 +40,8 @@ class Sources:
         self.crawlers: Dict[str, Type[Crawler]] = {}  # Map of cid -> crawler
         self.info: Dict[str, CrawlerInfo] = {}  # Map of cid -> crawler info
         self.sources: Dict[str, SourceItem] = {}  # Map of host -> source item
+        self._limiters: Dict[str, "SharedLimiter"] = {}
+        self._limiter_lock = threading.Lock()
 
     @property
     def version(self) -> int:
@@ -57,6 +62,8 @@ class Sources:
             del self._index
         self.rejected.clear()
         self.sources.clear()
+        with self._limiter_lock:
+            self._limiters.clear()
         self._sync_lock.abort()
 
     def ensure_load(self):
@@ -248,10 +255,19 @@ class Sources:
         self.ensure_load()
         return self.get_crawler(self.get_domain(url))
 
+    def _domain_limiter(self, domain: str, constructor: Type[Crawler]) -> "SharedLimiter":
+        from scraper import SharedLimiter
+
+        with self._limiter_lock:
+            limiter = self._limiters.get(domain)
+            if limiter is None:
+                limiter = SharedLimiter.create(constructor.max_concurrency())
+                self._limiters[domain] = limiter
+            return limiter
+
     def init_crawler(
         self,
         url: str,
-        workers: Optional[int] = None,
         parser: Optional[str] = None,
     ) -> Crawler:
         domain = self.get_domain(url)
@@ -263,9 +279,17 @@ class Sources:
         ctx.logger.debug(f"Creating crawler instance for {url}")
         crawler = constructor(
             origin=source.url,
-            workers=workers,
             parser=parser,
         )
+
+        if not crawler.language:
+            crawler.language = source.language
+
+        # The instance keeps its own cookies and abort signal, but shares the
+        # domain's limiter (throttle clock + slots) so request_rate_limit
+        # holds across every concurrent job hitting this source.
+        crawler.scraper.adopt_limiter(self._domain_limiter(domain, constructor))
+
         crawler.initialize()
         return crawler
 

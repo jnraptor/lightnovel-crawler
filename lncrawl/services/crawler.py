@@ -10,10 +10,24 @@ from pydantic import HttpUrl
 from ..context import ctx
 from ..core import Chapter as CrawlerChapter, Crawler, Novel as CrawlerNovel, SearchResult
 from ..dao import Chapter, ChapterImage, Novel
+from ..enums import LanguageCode
 from ..exceptions import ServerErrors
 from ..utils.url_tools import extract_host
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_language(lang: Optional[str]) -> Optional[str]:
+    """A known base language code or None. Source-derived values include
+    'multi' and regional variants (zh-cn) that must not reach the CHAR(2)
+    Novel.language column."""
+    if not lang:
+        return None
+    base = lang.strip().lower().split("-")[0]
+    try:
+        return LanguageCode(base).value
+    except ValueError:
+        return None
 
 
 class CrawlerService:
@@ -102,9 +116,15 @@ class CrawlerService:
             novel.synopsis = model.synopsis
             novel.tags = model.tags or []
             novel.rtl = model.is_rtl or False
-            novel.language = model.language
             novel.volume_count = len(model.volumes)
             novel.chapter_count = len(model.chapters)
+
+            # detect novel language
+            sample = f"{model.title}\n{model.synopsis or ''}".strip()
+            language = ctx.translator.detect_language(sample)
+            if not language:
+                language = model.language or crawler.language
+            novel.language = _normalize_language(language)
 
             # update novel extra
             extra = dict(**novel.extra)
@@ -183,6 +203,15 @@ class CrawlerService:
 
             # save chapter content
             ctx.files.save_text(chapter.content_file, model.body)
+
+            # detect language from chapter (strong signal)
+            language = ctx.translator.detect_language(model.body)
+            language = _normalize_language(language)
+            if language and novel.language != language:
+                novel.language = language
+                with ctx.db.session() as sess:
+                    sess.merge(novel)
+                    sess.commit()
 
             # save chapter images
             ctx.images.sync(chapter, model.images)

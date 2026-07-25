@@ -213,6 +213,9 @@ class {name}(SoupTemplate):
     has_mtl = {Feature.has_mtl in features}
     can_login = {Feature.can_login in features}
     can_search = {Feature.can_search in features}
+
+    # Enforced per source domain across all concurrent jobs.
+    # request_rate_limit = 3.0  # max requests per second
 """
 
     if Feature.can_search in features:
@@ -248,7 +251,6 @@ class {name}(SoupTemplate):
     def initialize(self) -> None:
         # You can customize `TextCleaner` and other necessary things.
         super().initialize()
-        self.taskman.init_executor(1)
 """
 
     if Feature.can_login in features:
@@ -307,7 +309,7 @@ class Crawler(ABC):
     chapters_per_volume = 100
     auto_create_volumes = True  # False when the site has real volume sections; then use volume_* selectors
 
-    def __init__(self, origin: str, workers: Optional[int] = None, parser: Optional[str] = None) -> None:
+    def __init__(self, origin: str, parser: Optional[str] = None) -> None:
         # origin must match a normalized entry in base_url; creates self.scraper, self.taskman, self.cleaner
 
     def initialize(self) -> None: ...

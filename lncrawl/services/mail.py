@@ -3,7 +3,7 @@ from __future__ import annotations
 from email.mime.text import MIMEText
 from functools import cached_property
 import logging
-from smtplib import SMTP
+from smtplib import SMTP, SMTPServerDisconnected
 from threading import Event, Thread
 
 from imap_tools import AND, MailBox, MailBoxUnencrypted, MailMessage, MailMessageFlags
@@ -19,6 +19,19 @@ from ..utils.file_tools import format_size
 
 logger = logging.getLogger(__name__)
 
+
+def _header_safe(value: str, *, max_length: int = 998) -> str:
+    """Strip CR/LF and other control characters from a header value.
+
+    Reply threading reuses the incoming Subject / Message-ID verbatim; an RFC2047
+    encoded-word can decode to bytes with embedded newlines, which makes
+    `msg.as_string()` raise and (since the message is only flagged on success) wedges
+    the invite handler into an endless reprocess loop. Sanitizing keeps assembly safe.
+    """
+    cleaned = "".join(c for c in value if c == "\t" or (c >= " " and c != "\x7f"))
+    return cleaned.strip()[:max_length]
+
+
 _IMAP_BACKOFF_BASE = 5
 _IMAP_BACKOFF_MAX = 300
 _IMAP_MAX_RETRIES = 10
@@ -29,7 +42,10 @@ class MailService:
         self._imap_lock: Event
         self._imap_listener: Thread
         self._smtp_lock = EventLock()
-        self.sender = ctx.config.mail.smtp_sender or ctx.config.mail.smtp_username
+
+    @property
+    def sender(self) -> str:
+        return ctx.config.mail.smtp_sender or ctx.config.mail.smtp_username
 
     def start(self):
         if ctx.config.mail.imap_enabled:
@@ -46,10 +62,8 @@ class MailService:
         self._smtp_lock.abort()
         if hasattr(self, "_imap_lock"):
             self._imap_lock.set()
-        if "server" in self.__dict__:
-            self.server.close()
-            self.__dict__.pop("server")
-        if hasattr(self, "_listener"):
+        self._drop_connection()
+        if hasattr(self, "_imap_listener"):
             self._imap_listener.join(timeout=5)
 
     @cached_property
@@ -65,7 +79,7 @@ class MailService:
             raise ServerErrors.smtp_server_unavailable.with_extra("missing config")
 
         logger.info("Preparing mail server...")
-        server = SMTP(smtp_server, smtp_port)
+        server = SMTP(smtp_server, smtp_port, timeout=30)
         try:
             if ctx.config.mail.smtp_starttls:
                 server.starttls()
@@ -76,7 +90,37 @@ class MailService:
             server.close()
             raise ServerErrors.smtp_server_login_fail from e
 
-    def send(self, email: str, subject: str, html_body: str):
+    def _drop_connection(self) -> None:
+        server = self.__dict__.pop("server", None)
+        if server is not None:
+            try:
+                server.close()
+            except Exception:
+                pass
+
+    def _ensure_connection(self) -> SMTP:
+        # SMTP servers drop idle connections; probe the cached one and
+        # reconnect if it went stale
+        server = self.server
+        try:
+            status, _ = server.noop()
+        except Exception:
+            status = -1
+        if status != 250:
+            logger.info("SMTP connection lost, reconnecting...")
+            self._drop_connection()
+            server = self.server
+        return server
+
+    def send(
+        self,
+        email: str,
+        subject: str,
+        html_body: str,
+        *,
+        in_reply_to: str | None = None,
+        references: str | None = None,
+    ):
         if not ctx.config.mail.smtp_enabled:
             logger.debug(f"SMTP disabled, skipping email to {email!r}")
             return
@@ -87,22 +131,54 @@ class MailService:
 
         # Create mail body
         msg = MIMEText(minified, "html")
-        msg["Subject"] = subject
+        msg["Subject"] = _header_safe(subject, max_length=200)
         msg["From"] = self.sender
         msg["To"] = email
 
+        in_reply_to = _header_safe(in_reply_to) if in_reply_to else None
+        references = _header_safe(references) if references else None
+        if in_reply_to:
+            msg["In-Reply-To"] = in_reply_to
+            chain = f"{references} {in_reply_to}".strip() if references else in_reply_to
+            msg["References"] = chain
+
         try:
             with self._smtp_lock:
-                self.server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+                server = self._ensure_connection()
+                try:
+                    server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+                except SMTPServerDisconnected:
+                    self._drop_connection()
+                    self.server.sendmail(msg["From"], [msg["To"]], msg.as_string())
         except ServerError:
             raise
         except Exception as e:
             raise ServerErrors.email_send_failure from e
 
-    def send_invite(self, email: str, inviter_name: str, link: str):
-        subject = "Lightnovel Crawler Invitation"
+    def send_invite(
+        self,
+        email: str,
+        inviter_name: str,
+        link: str,
+        *,
+        reply_subject: str | None = None,
+        in_reply_to: str | None = None,
+        references: str | None = None,
+    ):
+        if reply_subject:
+            subject = reply_subject.strip()
+            if not subject.lower().startswith("re:"):
+                subject = f"Re: {subject}"
+        else:
+            subject = "Lightnovel Crawler Invitation"
         body = emails.invite_template().render(inviter_name=inviter_name, link=link)
-        self.send(email, subject, body)
+        self.send(
+            email,
+            subject,
+            body,
+            in_reply_to=in_reply_to,
+            references=references,
+        )
 
     def send_otp(self, email: str, otp: str):
         subject = f"OTP ({otp})"
@@ -229,7 +305,15 @@ class MailService:
             return
         try:
             admin = ctx.users.get_admin()
-            ctx.users.send_invite_email(admin, sender)
+            message_id = (msg.obj.get("Message-ID") or "").strip() or None
+            references = (msg.obj.get("References") or "").strip() or None
+            ctx.users.send_invite_email(
+                admin,
+                sender,
+                reply_subject=msg.subject or None,
+                in_reply_to=message_id,
+                references=references,
+            )
             mb.flag([msg.uid], [MailMessageFlags.SEEN, MailMessageFlags.ANSWERED], True)
             logger.info(f"Sent invite to {sender}")
         except Exception as e:

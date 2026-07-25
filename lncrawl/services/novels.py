@@ -4,7 +4,17 @@ from typing import Any, Dict, List, Optional
 import sqlmodel as sq
 
 from ..context import ctx
-from ..dao import LanguageCode, Novel, NovelSort, NovelTag, NovelTranslation
+from ..dao import (
+    Artifact,
+    ChapterTranslation,
+    LanguageCode,
+    Novel,
+    NovelGlossary,
+    NovelSort,
+    NovelTag,
+    NovelTranslation,
+    VolumeTranslation,
+)
 from ..exceptions import ServerErrors
 from ..server.models import Paginated
 
@@ -155,7 +165,59 @@ class NovelService:
                 .limit(1)
             ).first()
 
-    def delete(self, novel_id: str) -> bool:
+    def list_glossaries(
+        self,
+        novel_id: str,
+        language: Optional[LanguageCode] = None,
+    ) -> Dict[str, Dict[str, str]]:
+        """Map of glossary terms for a novel, keyed by language."""
+        with ctx.db.session() as sess:
+            stmt = sq.select(NovelGlossary).where(sq.col(NovelGlossary.novel_id) == novel_id)
+            if language:
+                stmt = stmt.where(sq.col(NovelGlossary.language) == language.value)
+            rows = sess.exec(stmt).all()
+            return {row.language: dict(row.terms) for row in rows}
+
+    def update_glossary(
+        self,
+        novel_id: str,
+        language: LanguageCode,
+        terms: Dict[str, str],
+    ) -> Dict[str, str]:
+        """Replace the glossary terms of a novel for one target language."""
+        cleaned = {
+            key.strip(): value.strip()
+            for key, value in terms.items()
+            if key.strip() and value.strip()
+        }
+        with ctx.db.session() as sess:
+            if not sess.get(Novel, novel_id):
+                raise ServerErrors.no_such_novel
+            row = sess.exec(
+                sq.select(NovelGlossary)
+                .where(
+                    sq.col(NovelGlossary.novel_id) == novel_id,
+                    sq.col(NovelGlossary.language) == language.value,
+                )
+                .limit(1)
+            ).first()
+            if row:
+                row.terms = cleaned
+                sess.add(row)
+            elif cleaned:
+                sess.add(
+                    NovelGlossary(
+                        novel_id=novel_id,
+                        language=language.value,
+                        terms=cleaned,
+                    )
+                )
+            sess.commit()
+        return cleaned
+
+    def delete(self, novel_id: str, language: Optional[LanguageCode] = None) -> bool:
+        if language:
+            return self.delete_translation(novel_id, language)
         novel_dir = ctx.files.resolve(f"novels/{novel_id}")
         shutil.rmtree(novel_dir, True)
         with ctx.db.session() as sess:
@@ -171,6 +233,40 @@ class NovelService:
             sess.commit()
         ctx.recommendations.invalidate(novel_id)
         ctx.recommendations.index_remove(novel_id)
+        return True
+
+    def delete_translation(self, novel_id: str, language: LanguageCode) -> bool:
+        """Remove one target language of a novel: translation rows, glossary,
+        translated chapter files, and artifacts in that language."""
+        lang = language.value
+        with ctx.db.session() as sess:
+            chapters = sess.exec(
+                sq.select(ChapterTranslation).where(
+                    sq.col(ChapterTranslation.novel_id) == novel_id,
+                    sq.col(ChapterTranslation.language) == lang,
+                )
+            ).all()
+            for chapter in chapters:
+                ctx.files.resolve(chapter.content_file).unlink(True)
+
+            artifacts = sess.exec(
+                sq.select(Artifact).where(
+                    sq.col(Artifact.novel_id) == novel_id,
+                    sq.col(Artifact.language) == lang,
+                )
+            ).all()
+            for artifact in artifacts:
+                ctx.files.resolve(artifact.output_file).unlink(True)
+                sess.delete(artifact)
+
+            for model in (ChapterTranslation, VolumeTranslation, NovelTranslation):
+                sess.exec(
+                    sq.delete(model).where(
+                        sq.col(model.novel_id) == novel_id,
+                        sq.col(model.language) == lang,
+                    )
+                )
+            sess.commit()
         return True
 
     def find_by_url(self, novel_url: str) -> Optional[Novel]:
