@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from .activity import UserActivityStats
     from .announcement import AnnouncementCreateRequest, AnnouncementUpdateRequest
     from .config import ConfigProperty, ConfigSection, ConfigUpdateRequest
-    from .crawler import LoginData
+    from .crawler import LoginData, ProxyItem
     from .feedback import (
         Feedback,
         FeedbackCreateRequest,
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
         CrawlerTestRequest,
         PRCreateRequest,
         PRResponse,
+        SourceDiagnosis,
         SourceItem,
     )
     from .user import (
@@ -74,11 +75,13 @@ __all__ = [
     "CrawlerInfo",
     "CrawlerIndex",
     "CrawlerTestRequest",
+    "SourceDiagnosis",
     "SourceItem",
     "PRCreateRequest",
     "PRResponse",
     # crawler
     "LoginData",
+    "ProxyItem",
     # job
     "FetchNovelsRequest",
     "FetchVolumesRequest",
@@ -131,6 +134,7 @@ _LAZY: dict[str, str] = {
     "ConfigSection": ".config",
     "ConfigUpdateRequest": ".config",
     "LoginData": ".crawler",
+    "ProxyItem": ".crawler",
     "Feedback": ".feedback",
     "FeedbackCreateRequest": ".feedback",
     "FeedbackRespondRequest": ".feedback",
@@ -159,6 +163,7 @@ _LAZY: dict[str, str] = {
     "CrawlerTestRequest": ".sources",
     "PRCreateRequest": ".sources",
     "PRResponse": ".sources",
+    "SourceDiagnosis": ".sources",
     "SourceItem": ".sources",
     "CreateRequest": ".user",
     "ForgotPasswordRequest": ".user",

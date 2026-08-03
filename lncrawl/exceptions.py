@@ -1,10 +1,13 @@
 from typing import TYPE_CHECKING, Any
-from urllib.error import URLError
 
 from PIL import UnidentifiedImageError
 from requests.exceptions import RequestException
-from scraper.exceptions import AbortedException, CloudflareException
-from urllib3.exceptions import HTTPError
+
+# `AbortedException` is lncrawl's own exported name and stays as it is: the scraper
+# renamed the class to `Aborted` in 1.0, and chasing that through ~45 raise/except
+# sites would churn every job handler for no behavioural change.
+from scraper.browser import RenderError, SolveError
+from scraper.exceptions import Aborted as AbortedException, Blocked, Poisoned
 
 if TYPE_CHECKING:
     # Server-only, FastAPI-dependent names. Kept out of the runtime import graph
@@ -25,9 +28,7 @@ __all__ = [
     "WebSocketError",
     "WebSocketErros",
     "AbortedException",
-    "RetryErrorGroup",
     "ScraperErrorGroup",
-    "FallbackToBrowser",
     "get_exception_handlers",
 ]
 
@@ -36,23 +37,11 @@ class LNException(Exception):
     pass
 
 
-class FallbackToBrowser(Exception):
-    pass
-
-
 ScraperErrorGroup = (
-    URLError,
-    HTTPError,
-    CloudflareException,
-    RequestException,
-    FallbackToBrowser,
-    UnidentifiedImageError,
-)
-
-RetryErrorGroup = (
-    URLError,
-    HTTPError,
-    CloudflareException,
+    Blocked,
+    Poisoned,
+    RenderError,
+    SolveError,
     RequestException,
     UnidentifiedImageError,
 )

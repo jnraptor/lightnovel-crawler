@@ -2,10 +2,12 @@ import hashlib
 import types
 from typing import Any, Callable, List, Type
 
+from scraper import extract_base
+
+from lncrawl.context import ctx
 from lncrawl.core import Chapter, Crawler, Novel, PageSoup
 from lncrawl.services.sources.helper import extract_crawlers
 from lncrawl.utils.log_sink import LogSink
-from lncrawl.utils.url_tools import extract_base
 
 
 def parse_content(host: str, content: str):
@@ -87,7 +89,13 @@ def run_crawler_test(
     crawler_log_sink.attach(emit)
 
     step("Initializing crawler")
-    crawler = constructor(origin=origin)
+    crawler = constructor(
+        origin=origin,
+        scraper=ctx.scraper.open(
+            origin,
+            rate_limit=constructor.request_rate_limit,
+        ),
+    )
     crawler.initialize()
     meta("origin", origin)
 

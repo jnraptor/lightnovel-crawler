@@ -5,16 +5,20 @@ import hashlib
 import math
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 from pydantic.networks import HttpUrl
+from scraper import extract_base
 
 from ..context import ctx
 from ..exceptions import LNException
 from ..utils.file_tools import atomic_write
 from ..utils.text_tools import format_title, normalize
-from ..utils.url_tools import extract_base
 from .models import Chapter, Novel, SearchResult, Volume
+
+if TYPE_CHECKING:
+    from requests import Response
+    from scraper import Diagnosis, Scraper
 
 
 class Crawler(ABC):
@@ -37,12 +41,43 @@ class Crawler(ABC):
     version = 0
 
     @classmethod
-    def max_concurrency(cls) -> int:
+    def max_jobs(cls) -> int:
+        """Jobs allowed to run against this source at once.
+
+        A fairness bound rather than a throughput one. Measured, throughput keeps
+        rising as this grows — a job is far more than its requests, and only the HTTP
+        is capped by the scraper's per-address gate, so parsing, cleaning and storing
+        overlap freely. What the cap protects is every *other* domain, because one
+        source is otherwise free to occupy the whole runner pool.
+        """
         if not cls.request_rate_limit:
             return 1
         rate = math.ceil(cls.request_rate_limit)
-        n = ctx.config.crawler.runner_concurrency
-        return max(1, min(rate, n))
+        return max(1, min(rate, ctx.config.crawler.runner_concurrency))
+
+    @classmethod
+    def max_workers(cls) -> int:
+        """Threads this crawler's task manager runs.
+
+        One more than the scraper's per-address gate admits, which is not arbitrary:
+        measured against a live source, throughput rises to gate+1 and is flat above
+        it. The extra thread parses and stores a finished chapter while the others
+        hold the permits, so the gate stays fed instead of idling through every parse.
+
+        Deliberately not derived from `request_rate_limit`, which is an interval and
+        says nothing about how many threads can be busy at once. Reading it as both is
+        what left ten sources single-threaded for declaring no rate limit.
+        """
+        return max(1, ctx.config.crawler.max_sessions_per_exit) + 1
+
+    @classmethod
+    def max_concurrency(cls) -> int:
+        """Deprecated alias for `max_workers`.
+
+        Kept because sources are downloaded to disk at runtime, so a user's copy may
+        still call it; removing it would make that source fail rather than age.
+        """
+        return cls.max_workers()
 
     # ------------------------------------------------------------------------- #
     # Constructor & Destructors
@@ -51,6 +86,8 @@ class Crawler(ABC):
         self,
         parser: Optional[str] = None,
         origin: Optional[str] = None,
+        *,
+        scraper: Optional["Scraper"] = None,
     ) -> None:
         """
         Creates a standalone Crawler instance.
@@ -59,41 +96,43 @@ class Crawler(ABC):
         - origin (str): The origin URL of the source.
         - parser (Optional[str], optional): Desirable features of the parser. This can be the name of a specific parser
             ("lxml", "lxml-xml", "html.parser", or "html5lib") or it may be the type of markup to be used ("html", "html5", "xml").
+        - scraper (Optional[Scraper]): The session to crawl with. Supplied by
+            `SourceService`; omitted, one is opened here. Either way it shares the
+            process-wide state, so the pacing clock, the held address, the identity and
+            what has been learned describe the site rather than this object.
         """
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
         if not origin or origin not in self.base_url:
             origin = self.base_url[0]
 
-        from scraper import Scraper, TorProxyUrl, default_config
-
         from .cleaner import TextCleaner
         from .taskman import TaskManager
 
         self.cleaner = TextCleaner()
-        self.taskman = TaskManager(workers=self.max_concurrency())
+        self.taskman = TaskManager(workers=self.max_workers())
 
-        config = default_config()
-        if self.request_rate_limit:
-            config.min_request_interval_fast = 1.0 / self.request_rate_limit
-        if ctx.config.crawler.enable_proxy:
-            config.proxy.fallback_to_direct = ctx.config.crawler.allow_fallback_on_proxy_miss
-            for url in ctx.config.crawler.proxy_urls.split(","):
-                if not url.strip():
-                    continue
-                if url.startswith("tor;"):
-                    _, host, port, control_port, control_pass = url.split(";")
-                    tor_proxy = TorProxyUrl(
-                        url=f"socks5h://{host}:{port}/",
-                        control_host=host,
-                        control_password=control_pass,
-                        control_port=int(control_port),
-                    )
-                    config.proxy.proxy_urls.append(tor_proxy)
-                else:
-                    config.proxy.proxy_urls.append(url)
+        self.scraper = scraper or ctx.scraper.open(
+            origin,
+            parser=parser,
+            rate_limit=self.request_rate_limit,
+        )
+        # Attached here rather than passed to `open`, because the session is often
+        # opened by `SourceService` and handed in already built.
+        self.scraper.check_response = self.check_response
 
-        self.scraper = Scraper(origin=origin, parser=parser, config=config)
+    @property
+    def parser(self) -> str:
+        """Which parser this crawler's soups are built with.
+
+        A property so a source assigning `self.parser` in `initialize()` reaches the
+        session that builds the soup, which is where the choice is read.
+        """
+        return self.scraper.parser
+
+    @parser.setter
+    def parser(self, value: str) -> None:
+        self.scraper.parser = value
 
     def close(self) -> None:
         self.scraper.close()
@@ -105,6 +144,26 @@ class Crawler(ABC):
 
     def initialize(self) -> None:
         pass
+
+    def check_response(self, response: "Response", body: str) -> Optional["Diagnosis"]:
+        """Read a response the scraper accepted, and overrule it if it is a refusal.
+
+        Override where a source answers `200` to something it is actually refusing —
+        a JSON API returning `{"success": false, "message": ...}`, a page that renders
+        an apology at the right status. Nothing can detect that generically: on the
+        wire it is indistinguishable from content, and the difference lives in a schema
+        only this source knows.
+
+        Worth overriding even though the source could simply raise, because raising
+        happens after the retrieval is over. Returning a `Diagnosis` puts the refusal
+        *inside* the loop, where the layer is attributed, the address is blamed, and
+        the scraper rotates or escalates on its own — so a per-address quota moves to
+        the next exit instead of spending every one of them unrecorded.
+
+        Return `None` to accept the response. Called only for responses the scraper
+        found nothing wrong with, so there is no need to re-check for a block.
+        """
+        return None
 
     def login(self, username_or_email: str, password_or_token: str) -> None:
         pass
@@ -136,7 +195,7 @@ class Crawler(ABC):
         if scheme in ("http", "https"):
             return url
 
-        base_url = extract_base(self.scraper.last_soup_url).strip("/")
+        base_url = extract_base(self.scraper.last_url).strip("/")
         if url.startswith("//"):
             scheme = base_url.split(":")[0]
             return f"{scheme}:{url}"
@@ -145,7 +204,7 @@ class Crawler(ABC):
             return base_url + url
 
         if not page_url:
-            page_url = self.scraper.last_soup_url
+            page_url = self.scraper.last_url
 
         page_url = page_url.rstrip("/")
 

@@ -54,6 +54,12 @@ def gather_packages():
     packages = [
         "pylsp",
         "translator",
+        "curl_cffi",
+        # Unconditional, and it has to be. The solver imports websockets lazily per the
+        # AppContext contract, so PyInstaller's static analysis never sees it — and a
+        # frozen build would ship the solver with no transport, falling back to no
+        # solver at all without saying so. Exactly the bug that left curl_cffi out.
+        "websockets",
     ]
     return [f"--collect-all={pkg}" for pkg in packages]
 

@@ -8,11 +8,14 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Annotated, Any, Callable, Type, TypeVar, cast
+from typing import Annotated, Any, Callable, List, Tuple, Type, TypeVar, cast
 import uuid
 
 import dotenv
 import typer
+
+from .utils import proxy_tools
+from .utils.proxy_tools import ProxyExit
 
 T = TypeVar("T")
 
@@ -34,6 +37,15 @@ class Sensitive:
     """Use with `typing.Annotated` on config property return types.
 
     Properties marked this way are listed in the admin API with `sensitive=True`.
+    """
+
+
+class Hidden:
+    """Use with `typing.Annotated` on config property return types.
+
+    Properties marked this way are left out of the admin settings list. For a value the
+    generic widgets cannot edit — anything structured — which would otherwise be offered
+    as a JSON text area and needs a screen of its own instead.
     """
 
 
@@ -92,6 +104,34 @@ def _merge(target: dict, source: dict) -> None:
             _merge(target[key], value)
         else:
             target[key] = value
+
+
+_N = TypeVar("_N", int, float)
+
+
+def _at_least(name: str, value: _N, minimum: _N) -> _N:
+    """Reject a number below *minimum* at the setter.
+
+    The admin UI renders a plain number field from the return annotation, so nothing
+    upstream stops a zero or a negative arriving. These values reach the scraper's own
+    validation, which raises while a crawler is being constructed — after the setting
+    is already saved, and for every source at once.
+    """
+    if value is None or value < minimum:
+        raise ValueError(f"{name} must be at least {minimum}")
+    return value
+
+
+def _one_of(name: str, value: str, allowed: Tuple[str, ...]) -> str:
+    """Reject a string outside *allowed* at the setter.
+
+    Same reason as `_at_least`: the admin UI renders a free text field from a `str`
+    annotation, so a typo is only caught wherever the value is finally read.
+    """
+    chosen = (value or "").strip().lower()
+    if chosen not in allowed:
+        raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
+    return chosen
 
 
 def _update(target: dict, source: dict) -> dict:
@@ -546,32 +586,164 @@ class CrawlerConfig(_Section):
         self._set("can_use_browser", v)
 
     @property
-    def use_headless_mode(self) -> bool:
-        """Browser Headless Mode.
+    def generic_fallback(self) -> bool:
+        """Guess Unsupported Sites.
 
-        Run the browser in headless mode (no visible window) when doing browser-based crawling.
-        Off by default — a visible window is less likely to be detected as a bot and can handle
-        interactive challenges. Enable this on servers or in any environment where a display is
-        not available.
+        When a link belongs to a site with no crawler, try to read it anyway by guessing the
+        page structure. Off by default.
+
+        A guess is not a source. It reads the chapter text reliably, but the chapter *list* is
+        inferred, and a site that hides part of its list behind a button or spreads it over
+        several pages will produce a book that is quietly missing chapters. Results say how
+        much confidence to place in them and what could not be accounted for — read that
+        before trusting the download.
         """
-        return self._get("use_headless_mode", False)
+        return self._get("generic_fallback", False)
 
-    @use_headless_mode.setter
-    def use_headless_mode(self, v: bool) -> None:
-        self._set("use_headless_mode", v)
+    @generic_fallback.setter
+    def generic_fallback(self, v: bool) -> None:
+        self._set("generic_fallback", v)
 
     @property
-    def selenium_grid(self) -> str:
-        """Selenium Grid URL.
+    def browser_mode(self) -> str:
+        """Challenge Solver Window.
 
-        Address of your Selenium Grid or remote browser hub, if you run browsers on another machine.
-        You can set this here or leave it blank and define it in the environment instead.
+        Whether the browser shows a window while it answers a challenge: `auto`, `headless`,
+        or `headed`. Default is `auto`.
+
+        `auto` starts hidden and opens a window only if that fails, so a challenge nothing can
+        answer on its own arrives in front of you instead of failing quietly — and it waits
+        longer once it is visible, because somebody is there to finish it. Hiding costs
+        nothing on its own: measured across 46 challenged sites, a hidden browser gets past
+        every one a visible browser gets past, just as fast. `auto` also stays hidden wherever
+        no window could be seen, such as a server or a container, so it is safe to leave set.
+
+        `headless` never opens a window, and a challenge that needs one simply fails. `headed`
+        opens one every time, including for the challenges that would have cleared hidden.
         """
-        return self._get("selenium_grid", os.getenv("SELENIUM_GRID", ""))
+        return self._get("browser_mode", "auto")
 
-    @selenium_grid.setter
-    def selenium_grid(self, url: str) -> None:
-        self._set("selenium_grid", url)
+    @browser_mode.setter
+    def browser_mode(self, v: str) -> None:
+        self._set("browser_mode", _one_of("browser_mode", v, ("auto", "headed", "headless")))
+
+    @property
+    def browser_driver(self) -> str:
+        """Challenge Solver Browser.
+
+        Which browser answers a challenge: `firefox`, `chrome`, or `auto` to use whichever one
+        is installed, preferring Firefox. Default is `auto`.
+
+        Firefox is preferred because whichever browser solves also decides what every later
+        request has to look like — a clearance is only valid for the fingerprint it was earned
+        under — and Firefox is the fingerprint that gets through the most sites. The two clear
+        about equally well but disagree on which sites, so if one particular site refuses you,
+        naming the other browser here is worth trying.
+        """
+        return self._get("browser_driver", "auto")
+
+    @browser_driver.setter
+    def browser_driver(self, v: str) -> None:
+        self._set("browser_driver", _one_of("browser_driver", v, ("auto", "firefox", "chrome")))
+
+    @property
+    def impersonate(self) -> str:
+        """Browser Fingerprint.
+
+        Which browser every request should present itself as, for example `chrome` or `firefox`.
+        Leave blank to let the scraper choose. Enabling browser crawling pins this to whichever
+        browser solves challenges, because a challenge solved in one is only valid for requests
+        that still look like it. Set this if you would rather keep a different fingerprint
+        everywhere.
+        """
+        return self._get("impersonate", "")
+
+    @impersonate.setter
+    def impersonate(self, name: str) -> None:
+        self._set("impersonate", name)
+
+    @property
+    def max_sessions_per_exit(self) -> int:
+        """Concurrent Requests Per Site.
+
+        How many requests may be in flight to one site from one address at a time. Raising this
+        makes a crawl faster and also makes it look less like a person, which is what the sites
+        that block us are measuring. Default is `2`.
+        """
+        return self._get("max_sessions_per_exit", 2)
+
+    @max_sessions_per_exit.setter
+    def max_sessions_per_exit(self, v: int) -> None:
+        self._set("max_sessions_per_exit", _at_least("max_sessions_per_exit", v, 1))
+
+    @property
+    def max_attempts(self) -> int:
+        """Attempts Per Request.
+
+        How many times one page is tried before the crawl gives up on it, counted across every
+        method available. Default is `5`.
+        """
+        return self._get("max_attempts", 5)
+
+    @max_attempts.setter
+    def max_attempts(self, v: int) -> None:
+        self._set("max_attempts", _at_least("max_attempts", v, 1))
+
+    @property
+    def max_rotations(self) -> int:
+        """Addresses Per Request.
+
+        How many different proxy addresses one page may be retried from. Kept small on purpose:
+        when a site is refusing a page for a reason other than the address, changing address
+        repeatedly just spends the whole proxy pool on one page. Default is `2`.
+        """
+        return self._get("max_rotations", 2)
+
+    @max_rotations.setter
+    def max_rotations(self, v: int) -> None:
+        self._set("max_rotations", _at_least("max_rotations", v, 0))
+
+    @property
+    def solve_timeout(self) -> float:
+        """Challenge Solve Timeout.
+
+        How long, in seconds, the browser may spend clearing a single site's challenge before it
+        is treated as a failure. Default is `90`.
+        """
+        return self._get("solve_timeout", 90.0)
+
+    @solve_timeout.setter
+    def solve_timeout(self, v: float) -> None:
+        self._set("solve_timeout", _at_least("solve_timeout", v, 1.0))
+
+    @property
+    def use_archive(self) -> bool:
+        """Read From The Web Archive.
+
+        Allow pages to be served from the Wayback Machine when the site itself will not give them
+        up. This is what can rescue a novel from a site that has gone down for good, and it trades
+        freshness for reach: with this on, the *first* visit to every site goes to a snapshot
+        rather than to the site. Off by default.
+        """
+        return self._get("use_archive", False)
+
+    @use_archive.setter
+    def use_archive(self, v: bool) -> None:
+        self._set("use_archive", v)
+
+    @property
+    def archive_max_age(self) -> float:
+        """Web Archive Maximum Age.
+
+        How old, in seconds, an archived snapshot may be and still be used. `0` accepts a snapshot
+        of any age, which is the right answer for a site that no longer exists. Only has an effect
+        when reading from the web archive is on. Default is `0`.
+        """
+        return self._get("archive_max_age", 0.0)
+
+    @archive_max_age.setter
+    def archive_max_age(self, v: float) -> None:
+        self._set("archive_max_age", _at_least("archive_max_age", v, 0.0))
 
     @property
     def index_file_download_url(self) -> str:
@@ -663,31 +835,31 @@ class CrawlerConfig(_Section):
         self._set("runner_reset_interval", v)
 
     @property
-    def proxy_urls(self) -> str:
-        """Proxy URLs to route crawler requests through.
+    def proxies(self) -> Annotated[List[ProxyExit], Hidden]:
+        """The addresses crawler requests may leave from.
 
-        Comma-separated list of proxy URLs. Can also be set via the PROXY_URLS
-        environment variable. Each entry is one of:
-
-        - A plain proxy URL (e.g. http://host:port or socks5://host:port/).
-        - A Tor entry in the form tor;<host>;<port>;<control_port>;<control_password>
-          which is expanded to a SOCKS5 Tor proxy with control-port support.
-
-        Blank entries are ignored.
+        Edited on its own screen rather than in this list, because each entry is a
+        record. Falls back to the legacy `proxy_urls` string, or `PROXY_URLS` in the
+        environment, when nothing structured has been saved yet.
         """
-        return self._get("proxy_urls", os.getenv("PROXY_URLS") or "")
+        legacy = self._get("proxy_urls", "") or os.getenv("PROXY_URLS") or ""
+        # An empty stored list reads as "nothing saved here yet", so the legacy string
+        # still imports: every property is round-tripped through its setter at startup,
+        # which would otherwise write `[]` before the import ever ran.
+        return proxy_tools.load(self._get("proxies", []) or None, legacy)
 
-    @proxy_urls.setter
-    def proxy_urls(self, v: str) -> None:
-        self._set("proxy_urls", v)
+    @proxies.setter
+    def proxies(self, v: Any) -> None:
+        self._set("proxies", proxy_tools.dump(v))
+        self._set("proxy_urls", "")
 
     @property
     def enable_proxy(self) -> bool:
         """Enable Proxy.
 
-        When enabled, crawler requests are routed through the URLs listed in
-        `proxy_urls`. Disable to pass all traffic through a direct connection,
-        even if proxy URLs are configured. Enabled by default.
+        When enabled, crawler requests leave through the addresses on the Proxies
+        screen. Disable to send everything direct without having to remove them.
+        Enabled by default.
         """
         return self._get("enable_proxy", True)
 
@@ -697,11 +869,17 @@ class CrawlerConfig(_Section):
 
     @property
     def allow_fallback_on_proxy_miss(self) -> bool:
-        """Fallback to Direct on Proxy Miss.
+        """Use a Direct Connection Alongside the Proxies.
 
-        When proxy URLs are configured but none can be reached, allow the scraper
-        to fall back to a direct (localhost) connection instead of failing outright.
-        Enabled by default - disable if you want to hide your IP behind proxy.
+        Adds this machine's own address to the list of ways out, so a crawl still
+        works when a proxy will not carry it. It is not kept back for emergencies,
+        despite the name it used to have: the scraper leaves by the best kind of
+        address it has, and a direct connection outranks Tor and datacenter proxies.
+        With only those configured, requests leave from this machine until something
+        refuses one, and the proxy is what the retry moves to. Residential, ISP and
+        mobile exits outrank a direct connection and are used ahead of it.
+
+        Turn this off to keep every request on the proxies.
         """
         return self._get("allow_fallback_on_proxy_miss", True)
 

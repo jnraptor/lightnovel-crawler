@@ -7,12 +7,13 @@ from pathlib import Path
 import types
 from typing import Dict, Generator, Type
 
+from scraper import extract_host, validate_url
+
 from ...context import ctx
 from ...core import Crawler
 from ...server.models import CrawlerIndex, CrawlerInfo, SourceItem
 from ...utils.log_sink import replace_logger
 from ...utils.time_utils import current_timestamp
-from ...utils.url_tools import extract_host, validate_url
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def batch_import(*files: Path):
         yield from import_crawlers(file)
 
 
-def import_crawlers(file: Path) -> Generator[Type[Crawler], None, None]:
+def import_crawlers(file: Path, strict: bool = False) -> Generator[Type[Crawler], None, None]:
     # validate the file
     if not file.is_file():
         return
@@ -77,21 +78,24 @@ def import_crawlers(file: Path) -> Generator[Type[Crawler], None, None]:
         mod_name = hashlib.md5(file.name.encode()).hexdigest()
         spec = importlib.util.spec_from_file_location(mod_name, file)
         if not (spec and spec.loader):
-            logger.info(f"\\[{file}] Unexpected spec")
-            return
+            raise ImportError("Unexpected spec")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         module.__name__ = mod_name
         module.__file__ = str(file)
     except Exception as e:
-        logger.info(f"\\[{file}] Failed to load: {repr(e)}")
+        if strict:
+            raise
+        logger.warning(f"\\[{file}] Failed to load: {repr(e)}")
         return
 
     # extract all valid crawlers
     try:
         yield from extract_crawlers(module)
     except Exception as e:
-        logger.info(f"\\[{file}] Failed to extract crawlers: {repr(e)}")
+        if strict:
+            raise
+        logger.warning(f"\\[{file}] Failed to extract crawlers: {repr(e)}")
         return
 
 
@@ -119,7 +123,8 @@ def extract_crawlers(module: types.ModuleType) -> Generator[Type[Crawler], None,
         base_url = getattr(crawler, "base_url", [])
         urls = [base_url] if isinstance(base_url, str) else base_url
         urls = [str(url).lower().strip("/") + "/" for url in urls]
-        urls = [url for url in set(urls) if validate_url(url)]
+        urls = list(dict.fromkeys(url for url in urls if validate_url(url)))
+        urls.sort(key=lambda url: not url.startswith("https://"))
         if not urls:
             logger.info(f"\\[{file}] No base url: {crawler}")
             continue

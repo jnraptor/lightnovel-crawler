@@ -1,22 +1,21 @@
 import asyncio
 import logging
 from pathlib import Path
-import threading
 from threading import Event, Thread
 import traceback
-from typing import TYPE_CHECKING, Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type
+from urllib.parse import urlsplit
 
-if TYPE_CHECKING:
-    from scraper import SharedLimiter
+from scraper import LAYERS, extract_host
 
 from ...context import ctx
 from ...core import Crawler
-from ...exceptions import AbortedException, ServerErrors
-from ...server.models import CrawlerIndex, CrawlerInfo, SourceItem
+from ...exceptions import AbortedException, ServerError, ServerErrors
+from ...server.models import CrawlerIndex, CrawlerInfo, SourceDiagnosis, SourceItem
 from ...utils.event_lock import EventLock
 from ...utils.fts_store import FTSStore
 from ...utils.text_tools import normalize
-from ...utils.url_tools import extract_host, normalize_url
+from ...utils.url_tools import normalize_url
 from .helper import (
     batch_import,
     create_crawler_info,
@@ -40,8 +39,6 @@ class Sources:
         self.crawlers: Dict[str, Type[Crawler]] = {}  # Map of cid -> crawler
         self.info: Dict[str, CrawlerInfo] = {}  # Map of cid -> crawler info
         self.sources: Dict[str, SourceItem] = {}  # Map of host -> source item
-        self._limiters: Dict[str, "SharedLimiter"] = {}
-        self._limiter_lock = threading.Lock()
 
     @property
     def version(self) -> int:
@@ -62,8 +59,6 @@ class Sources:
             del self._index
         self.rejected.clear()
         self.sources.clear()
-        with self._limiter_lock:
-            self._limiters.clear()
         self._sync_lock.abort()
 
     def ensure_load(self):
@@ -247,6 +242,56 @@ class Sources:
         source = self.get_source(domain)
         return self.info[source.crawler_id]
 
+    def diagnose(self, domain: str) -> SourceDiagnosis:
+        """Why *domain* is or is not working.
+
+        Reports a rejection rather than refusing on one, unlike every crawl path — a
+        rejected host is the one whose diagnosis is most worth reading — and answers
+        for a rejected host that has no crawler at all, which is most of them.
+        """
+        self.ensure_load()
+        if domain.startswith("www."):
+            domain = domain[4:]
+        rejected = self.rejected.get(domain)
+        source = self.sources.get(domain)
+        if source is None and rejected is None:
+            raise ServerErrors.no_crawler.with_extra(domain)
+
+        url = source.url if source else f"https://{domain}/"
+        health = ctx.health.reasons(domain)
+        result = SourceDiagnosis(
+            domain=domain,
+            url=url,
+            rejected=rejected,
+            is_disabled=source.is_disabled if source else True,
+            disable_reason=source.disable_reason if source else rejected,
+            health=health,
+            samples={reason: ctx.health.samples(domain, reason) for reason in health},
+            explain=ctx.scraper.explain(url),
+        )
+
+        profile = ctx.scraper.knows(url)
+        if profile is None:
+            return result
+
+        result.known = True
+        result.tier = profile.tier
+        result.interval = profile.interval
+        result.successes = profile.successes
+        result.failures = profile.failures
+        result.consecutive_failures = profile.consecutive_failures
+        result.has_clearance = profile.clearance_for(url) is not None
+
+        layer = profile.binding
+        if layer is not None:
+            facts = LAYERS[layer]
+            result.binding_layer = int(layer)
+            result.binding_layer_name = str(layer)
+            result.reads = facts.trait.value
+            result.stance = facts.stance.value
+            result.summary = facts.summary
+        return result
+
     def get_crawler(self, domain: str) -> Type[Crawler]:
         source = self.get_source(domain)
         return self.crawlers[source.crawler_id]
@@ -255,41 +300,72 @@ class Sources:
         self.ensure_load()
         return self.get_crawler(self.get_domain(url))
 
-    def _domain_limiter(self, domain: str, constructor: Type[Crawler]) -> "SharedLimiter":
-        from scraper import SharedLimiter
-
-        with self._limiter_lock:
-            limiter = self._limiters.get(domain)
-            if limiter is None:
-                limiter = SharedLimiter.create(constructor.max_concurrency())
-                self._limiters[domain] = limiter
-            return limiter
-
     def init_crawler(
         self,
         url: str,
         parser: Optional[str] = None,
+        timeout: Optional[float] = None,
+        probe: bool = False,
     ) -> Crawler:
         domain = self.get_domain(url)
-        source = self.get_source(domain)
+        try:
+            source = self.get_source(domain)
+        except ServerError:
+            if not ctx.config.crawler.generic_fallback:
+                raise
+            return self._init_generic(url, domain, parser, timeout, probe)
+
         cid = source.crawler_id
         constructor = self.crawlers[cid]
 
         # create instance
         ctx.logger.debug(f"Creating crawler instance for {url}")
+        open_session = ctx.scraper.probe if probe else ctx.scraper.open
         crawler = constructor(
             origin=source.url,
             parser=parser,
+            scraper=open_session(
+                source.url,
+                parser=parser,
+                rate_limit=constructor.request_rate_limit,
+                timeout=timeout,
+            ),
         )
 
         if not crawler.language:
             crawler.language = source.language
 
-        # The instance keeps its own cookies and abort signal, but shares the
-        # domain's limiter (throttle clock + slots) so request_rate_limit
-        # holds across every concurrent job hitting this source.
-        crawler.scraper.adopt_limiter(self._domain_limiter(domain, constructor))
+        crawler.initialize()
+        return crawler
 
+    def _init_generic(
+        self,
+        url: str,
+        domain: str,
+        parser: Optional[str],
+        timeout: Optional[float],
+        probe: bool,
+    ) -> Crawler:
+        """Read a site nobody has written a crawler for, by guessing its structure.
+
+        Deliberately not registered as a source: it has no `base_url`, answers for any
+        host, and must never be mistaken for one that has been verified against the site.
+        """
+        from ...templates.generic import GenericCrawler
+
+        origin = f"{urlsplit(url).scheme or 'https'}://{urlsplit(url).netloc}/"
+        ctx.logger.warn(f"No crawler for {domain}, guessing the page structure")
+        open_session = ctx.scraper.probe if probe else ctx.scraper.open
+        crawler = GenericCrawler(
+            origin=origin,
+            parser=parser,
+            scraper=open_session(
+                origin,
+                parser=parser,
+                rate_limit=GenericCrawler.request_rate_limit,
+                timeout=timeout,
+            ),
+        )
         crawler.initialize()
         return crawler
 
@@ -316,7 +392,7 @@ class Sources:
                 event.set()
                 emit("END")
 
-        threading.Thread(target=run, daemon=True).start()
+        Thread(target=run, daemon=True).start()
 
         while True:
             item = await queue.get()

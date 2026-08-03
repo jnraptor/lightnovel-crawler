@@ -1,5 +1,7 @@
-from typing import Any, Dict, List, Optional
+from itertools import islice
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional
 
+from sqlalchemy.dialects.postgresql import JSONB
 import sqlmodel as sq
 
 from ..context import ctx
@@ -8,6 +10,29 @@ from ..dao import Chapter, Job, LanguageCode, User, Volume
 from ..dao.chapter import ChapterTranslation
 from ..exceptions import ServerErrors
 from ..server.models import Paginated, ReadChapterResponse
+
+# An empty body still compresses to a frame of a few bytes, so size cannot decide
+# emptiness on its own — but it rules a file out without opening it, which is what keeps
+# a sweep across every finished chapter in the library cheap.
+EMPTY_CANDIDATE_BYTES = 512
+
+# SQLite binds each member of an IN clause as its own variable, and older builds stop at
+# 999 of them.
+_ID_CHUNK = 500
+
+# Rows pulled per round trip when streaming a scan over the whole chapter table.
+_SCAN_CHUNK = 1000
+
+# The `extra` key counting how many times a chapter came back with no text. Named here
+# because both the download path that writes it and the query that clears it have to agree,
+# and they did not: the clear was built from the column object rather than the key.
+EMPTY_ATTEMPTS_KEY = "empty_attempts"
+
+
+class EmptyChapter(NamedTuple):
+    id: str
+    novel_id: str
+    serial: int
 
 
 class ChapterService:
@@ -32,7 +57,7 @@ class ChapterService:
                 stmt = stmt.where(sq.col(Chapter.is_done).is_(is_crawled))
             stmt = stmt.order_by(sq.col(Chapter.serial).asc())
             items = list(sess.exec(stmt).all())
-        self._put_translation(items, language)
+        self._put_translations(items, language)
         return items
 
     def list_page(
@@ -72,7 +97,7 @@ class ChapterService:
             items = list(sess.exec(stmt).all())
 
             # get translations
-            self._put_translation(items, language)
+            self._put_translations(items, language)
 
             return Paginated(
                 total=total,
@@ -138,11 +163,69 @@ class ChapterService:
             sess.delete(chapter)
             sess.commit()
 
-    def _put_translation(
-        self,
-        items: List[Chapter],
-        language: Optional[LanguageCode],
-    ):
+    def find_stored_empty(self, *, untried_only: bool = False) -> Iterable[EmptyChapter]:
+        """Find chapters marked finished over stored content that holds no text."""
+        stmt = sq.select(
+            Chapter.id,
+            Chapter.novel_id,
+            Chapter.serial,
+        ).where(
+            sq.col(Chapter.is_done).is_(True),
+        )
+        if untried_only:
+            stmt = stmt.where(
+                Chapter.extra[EMPTY_ATTEMPTS_KEY].as_string().is_(None),
+            )
+
+        with ctx.db.session() as sess:
+            rows = sess.exec(stmt.execution_options(yield_per=_SCAN_CHUNK))
+            for chapter_id, novel_id, serial in rows:
+                if self._is_stored_empty(novel_id, serial):
+                    yield EmptyChapter(chapter_id, novel_id, serial)
+
+    def reopen_empty(self, chapter_ids: Iterable[str], *, reset_attempts: bool = False) -> int:
+        """Clear `is_done` so these chapters are downloaded again."""
+        sa_extra = Chapter.extra
+        if reset_attempts:
+            extra_col = sq.col(Chapter.extra)
+            if ctx.db.engine.dialect.name == "postgresql":
+                empty_literal = sq.literal(EMPTY_ATTEMPTS_KEY)
+                replaced_json = sq.cast(extra_col, JSONB).op("-")(empty_literal)
+                sa_extra = sq.cast(replaced_json, sq.JSON)
+            else:
+                sa_extra = sq.func.json_remove(extra_col, f'$."{EMPTY_ATTEMPTS_KEY}"')
+
+        total = 0
+        with ctx.db.session() as sess:
+            iterator = iter(chapter_ids)
+            while batch := list(islice(iterator, _ID_CHUNK)):
+                result = sess.exec(
+                    sq.update(Chapter)
+                    .where(sq.col(Chapter.id).in_(batch))
+                    .values(is_done=False, extra=sa_extra)
+                )
+                total += result.rowcount or 0
+            sess.commit()
+        return total
+
+    @staticmethod
+    def _is_stored_empty(novel_id: str, serial: int) -> bool:
+        content_file = Chapter.content_path(novel_id, serial)
+        try:
+            path = ctx.files.resolve(content_file)
+        except Exception:
+            return False
+        if not path.exists():
+            return True
+        try:
+            if path.stat().st_size > EMPTY_CANDIDATE_BYTES:
+                return False
+            return not ctx.files.load_text(content_file).strip()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _put_translations(items: List[Chapter], language: Optional[LanguageCode]) -> None:
         if language and items:
             novel_id = items[0].novel_id
             serials = [item.serial for item in items]

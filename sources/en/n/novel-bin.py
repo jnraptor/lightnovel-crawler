@@ -10,3 +10,4 @@ class Novel_Bin(NovelFullTemplate):
     has_manga = False
     base_url = ["https://novel-bin.com/", "https://novelbin.me"]
     request_rate_limit = 1
+    chapter_list_on_novel_page = True

@@ -2,10 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [4.14.0] - 2026-08-03
+
+### Added
+
+- **51 new sources**, across English, Spanish, Chinese, Russian and Turkish. Most cost almost nothing to add: two new templates read any site built on WordPress categories or Blogger labels, which is what a large share of translation blogs are.
+- **A link from an unsupported site can now be read by guessing the page structure** — off by default, via **Guess Unsupported Sites**. Chapter text comes out reliably; the chapter *list* is inferred, so every result says how much of the list it could account for. Read that before trusting the download: a site that hides part of its list behind a button produces a book quietly missing chapters.
+- **A Proxies screen, and proxies can now say what kind of address they are.** Only ISP, residential and mobile addresses get past a site that blocks on reputation, and every proxy used to be read as datacenter — so a residential proxy bought for exactly that was never used for it. Existing configuration imports automatically.
+- **Six crawler settings you could not reach before**, including how many requests a site gets at once, and whether pages may be read from the Web Archive. Archive reading can recover a novel from a site that is gone for good; it is off by default because it sends the first visit to *every* site to a snapshot.
+
+### Changed
+
+- **A rewritten HTTP layer, built around how sites detect crawlers.** Across 150 real source hosts it retrieves more of them, and a challenge is answered by a real browser whose clearance is then reused.
+  - **Firefox solves by default, Chrome as the fallback**, with a **Challenge Solver Browser** setting to name one. Whichever browser solves decides what every later request has to look like, and Firefox reaches the most sites.
+  - **The browser stays hidden, and shows itself only when hiding fails.** A hidden browser gets past every site a visible one does, so the window is worth opening only for the challenge nothing can answer alone — and once it is open it waits five minutes instead of ninety seconds, because somebody is there to finish it. A new **Challenge Solver Window** setting pins it to always hidden or always visible; on a server it stays hidden whatever you pick, since nobody could see it. Replaces the old headless switch.
+  - **The Docker image ships Firefox on `arm64` as well**, so an `arm64` image can solve for the first time. **Set `TZ`** to the timezone your address looks like it is in: with the container clock left wrong it cleared one challenged site of six, and with it right, all six.
+  - New `impersonate` setting; `selenium_grid` is gone.
+- **50 source domains are flagged as rejected** — parked, redirecting into an ad network, or resold. None reported an error: a page full of adverts answers `200`, so the crawl succeeded and produced an empty book.
+- **`wordexcerpt` and `webnovelonline` rebuilt** against the APIs their sites now use, after both became single-page apps their old selectors read as empty. `webnovelonline` now walks its whole listing — 1305 chapters where the page shows 50.
+- **Forty sources were fetching fewer chapters at once than they could.** Ten go from one worker to three, thirty from two.
+- **The README is rewritten and the site list moved to `SOURCES.md`**, so the front page is about installing and using the app rather than 600 lines of table.
+
+### Fixed
+
+- **An empty chapter is no longer saved and marked finished** — the most common way a source breaks, with no signal for it anywhere. It is retried now, and chapters already stored empty are reopened on their own. A challenge page served as `200` is no longer parsed as chapter content either.
+- **A failed job says why, instead of showing a stack trace** — which defence is blocking, and whether any setting could help.
+- **`allow_fallback_on_proxy_miss` said the opposite of what it does.** The direct address joins the proxy list ranked ahead of Tor and datacenter ones, so with a tor-pool configured at the default, requests were leaving from the machine's own address.
+- **`lncrawl search` now ends when it says it will.** A 10 second timeout measured 74; the same search finishes in 16 and returns *more*.
+- **The server no longer leaks memory on every failed request** — 66 MB per 800 requests, now flat over 6,400.
+- Smaller: a page that never finished rendering is a diagnosis rather than a crash; a source's chosen HTML parser is finally used; a source's main address no longer varies between runs; what a crawl learned survives the command exiting; `chireads` search results have titles again.
 
 ## [4.13.1] - 2026-07-25
 
@@ -787,8 +814,7 @@ Major changes in this release:
 ## [2.24.3] - 2021-02-12
 
 - Adds new source
-- Fixes bug
-  #733
+- Fixes bug #733
 
 ## [2.24.1] - 2020-12-14
 

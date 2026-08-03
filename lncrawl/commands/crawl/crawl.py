@@ -109,8 +109,7 @@ def crawl(
     try:
         crawler = ctx.sources.init_crawler(url)
         if rate_limit:
-            # Pacing is enforced by the scraper's throttle clock, not the taskman.
-            crawler.scraper.config.min_request_interval_fast = 1.0 / rate_limit
+            ctx.scraper.set_rate_limit(url, rate_limit)
         can_login = getattr(crawler, "can_login", False)
     except ServerError as e:
         print(f"[red]{e.format(True)}[/red]")

@@ -27,6 +27,7 @@ class Scrubber:
         scrubber.delete_expired_tokens()
         scrubber.delete_inactive_users()
         scrubber.delete_old_activities()
+        # scrubber.recover_empty_chapters()
 
     def __init__(self, signal=Event()) -> None:
         self.signal = signal
@@ -192,3 +193,8 @@ class Scrubber:
                 )
             )
             sess.commit()
+
+    def recover_empty_chapters(self):
+        found = ctx.chapters.find_stored_empty(untried_only=True)
+        total = ctx.chapters.reopen_empty((item.id for item in found))
+        logger.info(f"Reopened {total} chapter(s) stored with an empty body")

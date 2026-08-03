@@ -1,22 +1,27 @@
 from abc import abstractmethod
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 from ..utils.event_lock import EventLock
 from .models import Chapter, Novel, SearchResult, Volume
-from .template import BrowserTemplate
+from .template import CrawlerTemplate
+
+if TYPE_CHECKING:
+    from scraper import Scraper
 
 
-class LegacyCrawler(BrowserTemplate):
+class LegacyCrawler(CrawlerTemplate):
     def __init__(
         self,
         parser: Optional[str] = None,
         origin: Optional[str] = None,
+        *,
+        scraper: Optional["Scraper"] = None,
     ) -> None:
         if isinstance(self.base_url, str):
             self.base_url = [self.base_url]
 
         self.home_url = self.base_url[0]
-        super().__init__(parser, origin)
+        super().__init__(parser, origin, scraper=scraper)
 
         self._lock = EventLock()
         self.novel_url: str = ""
@@ -108,6 +113,9 @@ class LegacyCrawler(BrowserTemplate):
 
     def post_soup(self, *args: Any, **kwargs: Any):
         return self.scraper.post_soup(*args, **kwargs)
+
+    def render_soup(self, *args: Any, **kwargs: Any):
+        return self.scraper.render_soup(*args, **kwargs)
 
     # ------------------------------------------------------------------------- #
     # Crawler
