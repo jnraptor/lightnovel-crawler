@@ -10,6 +10,7 @@ from scraper import extract_host
 
 from ..context import ctx
 from ..core import Chapter as CrawlerChapter, Crawler, Novel as CrawlerNovel, SearchResult
+from ..core.tiers import describe, is_stale, stamp
 from ..dao import Chapter, ChapterImage, Novel
 from ..enums import LanguageCode
 from ..exceptions import ServerErrors
@@ -34,6 +35,10 @@ def _normalize_language(lang: Optional[str]) -> Optional[str]:
         return None
 
 
+def _origin_of(crawler: Crawler) -> str:
+    return describe(getattr(crawler, "tier", None), getattr(crawler, "__file__", ""))
+
+
 class CrawlerService:
     def __init__(self) -> None:
         pass
@@ -50,6 +55,7 @@ class CrawlerService:
         if crawler is None:
             crawler = ctx.sources.init_crawler(url)
 
+        crawler.novel_url = url
         prev_signal = crawler.scraper.signal
         if signal:
             crawler.scraper.signal = signal
@@ -88,6 +94,8 @@ class CrawlerService:
         novel_url = str(url)
 
         with self.prepare_crawler(user_id, novel_url, signal, custom) as crawler:
+            logger.info(f"Using {_origin_of(crawler)} to crawl {novel_url}")
+
             # fetch novel metadata
             model = CrawlerNovel(url=novel_url)
             crawler.read_novel(model)
@@ -133,8 +141,7 @@ class CrawlerService:
             # update novel extra
             extra = dict(**novel.extra)
             extra.update(model.get_extras())
-            extra["crawler_version"] = crawler.version
-            novel.extra = extra
+            novel.extra = stamp(extra, crawler.version, crawler.tier)
 
             # save updates
             with ctx.db.session() as sess:
@@ -185,11 +192,13 @@ class CrawlerService:
             raise ServerErrors.invalid_url
 
         with self.prepare_crawler(user_id, novel.url, signal, custom) as crawler:
-            # check if download is necessary
+            # check if download is necessary. Staleness needs positive evidence: the same
+            # tier, both versions known, and different. A host that moved tiers, or content
+            # stamped before this existed, is left alone rather than re-downloaded.
             if (
                 not refresh
                 and chapter.is_available
-                and chapter.extra.get("crawler_version") == crawler.version
+                and not is_stale(chapter.extra, crawler.version, crawler.tier)
             ):
                 logger.debug(f"Skipped: {novel.title}] - Chapter {chapter.serial}")
                 return chapter
@@ -226,8 +235,7 @@ class CrawlerService:
             # set extras
             extra = dict(**chapter.extra)
             extra.update(model.get_extras())
-            extra["crawler_version"] = crawler.version
-            chapter.extra = extra
+            chapter.extra = stamp(extra, crawler.version, crawler.tier)
 
             # update title and status
             chapter.is_done = True
@@ -256,8 +264,7 @@ class CrawlerService:
 
         extra = dict(**chapter.extra)
         extra[EMPTY_ATTEMPTS_KEY] = attempts
-        extra["crawler_version"] = crawler.version
-        chapter.extra = extra
+        chapter.extra = stamp(extra, crawler.version, crawler.tier)
         chapter.is_done = attempts >= MAX_EMPTY_ATTEMPTS
 
         with ctx.db.session() as sess:
@@ -295,7 +302,7 @@ class CrawlerService:
             if (
                 not refresh
                 and image.is_available
-                and image.extra.get("crawler_version") == crawler.version
+                and not is_stale(image.extra, crawler.version, crawler.tier)
             ):
                 logger.debug(f"Skipped: {novel.title}] - Image {image.id}")
                 return image
@@ -305,9 +312,7 @@ class CrawlerService:
             crawler.download_image(str(url), file)
 
             image.is_done = file.is_file()
-            extra = dict(**image.extra)
-            extra["crawler_version"] = crawler.version
-            image.extra = extra
+            image.extra = stamp(dict(**image.extra), crawler.version, crawler.tier)
 
             # update db
             with ctx.db.session() as sess:
@@ -328,6 +333,7 @@ class CrawlerService:
         # get crawler
         source = ctx.sources.get_source(domain)
         with self.prepare_crawler(user_id, source.url, signal, custom) as crawler:
+            logger.info(f"Using {_origin_of(crawler)} to search {domain}")
             results = list(crawler.search(query))
             results.sort(key=lambda x: -SequenceMatcher(a=x.title, b=query).ratio())
             return list(results)
